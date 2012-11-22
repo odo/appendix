@@ -5,6 +5,13 @@ The name almost gives it away: This is an Erlang server to manage an append-only
 Successive junks of data can be handed to the server which returns an integer pointer.
 Retrieving data works by traversing the file using pointers.
 
+Building:
+```
+git clone git://github.com/odo/indexed_append_file.git
+cd indexed_append_file/
+make
+```
+
 Starting the server with a path prefix will create two files, one for the data, one for the index.
 ```erlang
 1> iaf_index_server:start_link(iaf, "/tmp/iaf/data"). 
@@ -61,3 +68,4 @@ Performance is around 80k ops for writes and 38k for reads for up to 10.000.000 
 ![indexed_append_file perfomance](https://raw.github.com/odo/indexed_append_file/master/private/perf.png "indexed_append_file perfomance")
 
 This measurement was taken on an laptop with a Intel Core 2 Duo @ 2,53 GHz, 1067 MHz memory bus and a SATA Seagate Momentus XT.
+On our server system we see double to triple the performance.

@@ -15,12 +15,12 @@ iaf_index_server starting with {<<"/tmp/iaf/data_index">>,
 Files don't exist, creating new ones. {ok,<0.43.0>}
 ```
 Let's add some data:
-```
+```erlang
 2> iaf_index_server:put(iaf, <<"hello">>).
 1353591869758408
 ```
 Now we can step in and retrieve data:
-```
+```erlang
 3> iaf_index_server:next(iaf, 0).
 {1353591869758408,<<"hello">>}
 4> iaf_index_server:next(iaf, 9999999999999999).
@@ -29,14 +29,14 @@ not_found
 1353591937266001
 ```
 The intended way is to step throw by using the last retrieved key to get the next key-value pair:
-```
+```erlang
 6> AccFun = fun(_, {Pointer, Acc}) -> {PointerNew, Data} = iaf_index_server:next(iaf, Pointer), {PointerNew, [Data| Acc]} end.
 #Fun<erl_eval.12.111823515>
 7> lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).
 {1353591937266001,[<<"world">>,<<"hello">>]}
 ```
 The server can be suspended and restarted, rebuilding the index from the existing files:
-```
+```erlang
 8> iaf_index_server:stop(iaf).
 ok
 9> iaf_index_server:start_link(iaf, "/tmp/iaf/data").                                                                                                       
@@ -51,3 +51,11 @@ loaded in 25.074 ms.
 10> lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).    
 {1353591937266001,[<<"world">>,<<"hello">>]}
 ```
+
+Performance:
+
+Writing is O(1), reading via next/2 is O(log n).
+
+Performance is around 80k ops for writes and 38k for reads for up to 10.000.000 elements of 74 bytes each:
+
+![indexed_append_file perfomance](https://github.com/odo/indexed_append_file/blob/master/priv/perf.png "indexed_append_file perfomance")

@@ -5129,7 +5129,7 @@
 		<key>legendx</key>
 		<integer>100</integer>
 		<key>legendy</key>
-		<integer>520</integer>
+		<integer>360</integer>
 		<key>marginbottom</key>
 		<real>80</real>
 		<key>margincolor</key>
@@ -5543,13 +5543,13 @@
 		<key>verno</key>
 		<integer>30</integer>
 		<key>winh</key>
-		<integer>558</integer>
+		<integer>389</integer>
 		<key>winw</key>
-		<integer>906</integer>
+		<integer>763</integer>
 		<key>winx</key>
-		<integer>351</integer>
+		<integer>374</integer>
 		<key>winy</key>
-		<integer>536</integer>
+		<integer>698</integer>
 		<key>xmax1</key>
 		<real>11000000</real>
 		<key>xmax2</key>

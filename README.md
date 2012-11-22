@@ -28,7 +28,7 @@ not_found
 5> iaf_index_server:put(iaf, <<"world">>).
 1353591937266001
 ```
-The intended way is to step throw by using the last retrieved key to get the next key-value pair:
+The intended way is to iterate by using the last retrieved key to get the next key-value pair:
 ```erlang
 6> AccFun = fun(_, {Pointer, Acc}) -> {PointerNew, Data} = iaf_index_server:next(iaf, Pointer), {PointerNew, [Data| Acc]} end.
 #Fun<erl_eval.12.111823515>

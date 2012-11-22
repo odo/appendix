@@ -58,4 +58,4 @@ Writing is O(1), reading via next/2 is O(log n).
 
 Performance is around 80k ops for writes and 38k for reads for up to 10.000.000 elements of 74 bytes each:
 
-![indexed_append_file perfomance](https://github.com/odo/indexed_append_file/blob/master/private/perf.png "indexed_append_file perfomance")
+![indexed_append_file perfomance](https://raw.github.com/odo/indexed_append_file/master/private/perf.png "indexed_append_file perfomance")

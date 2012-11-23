@@ -67,6 +67,36 @@ loaded in 0.179 ms.
 {1353591937266001,[<<"world">>,<<"hello">>]}
 ```
 
+You can also retrieve multiple elements by asking for the file and the data's location:
+```erlang
+11> [appendix_server:put(as, E)||E<-[<<"you">>,<<"are">>,<<"so">>,<<"wonderful">>,<<"!">>]].
+[1353679758861011,1353679758861040,1353679758861056,
+ 1353679758861149,1353679758861175]
+12> {LastPointer, FileName, Position, Length} = appendix_server:file_pointer(as, 0, 3).
+{1353679758861011,<<"/tmp/appendix/test_data">>,0,13}
+```
+
+What you got is a pointer to the last message in the requested range, the filename, the offset and the length of the data.
+You can use this to retrieve the data:
+
+```erlang
+13> {ok, File} = file:open(FileName, [raw, binary]).
+{ok,{file_descriptor,prim_file,{#Port<0.817>,14}}}
+14> {ok, Data} = file:pread(File, Position, Length).
+{ok,<<"helloworldyou">>}
+15> file:close(File).
+ok
+```
+
+Actally this is exactly what data_slice/3 does:
+```erlang
+16> {LastPointer, Data} =:= appendix_server:data_slice(as, 0, 3).
+true
+17> appendix_server:data_slice(as, LastPointer, 20).
+{1353679758861175,<<"aresowonderful!">>}
+```
+
+
 Performance:
 
 Writing is O(1), reading via next/2 is O(log n).

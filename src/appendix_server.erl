@@ -36,12 +36,12 @@
 % callbacks
 -export ([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
--export([perf/1, perf_read/1, trace_perf/1]).
+-export([perf/1, perf_read/1, perf_file_pointer/2, trace/3]).
 
-trace_perf(Exp) ->
+trace(M, F, A) ->
 	fprof:trace([start, {procs, [whereis(iaf)]},{file, "/tmp/profile"}]),
-	perf(Exp),
-	fprof:profile({file, "/tmp/profile"}),
+	apply(M, F, A),
+	fprof:profile({file, "/tmp/appendix_profile"}),
 	fprof:analyse().
 
 perf(Exp) ->
@@ -69,6 +69,15 @@ perf_read(Exp) ->
 	lists:foldl(fun(_, I) -> {I2, _} = ?MODULE:next(iaf, I), I2 end, 0, Seq),
 	T = timer:now_diff(now(), StartTime),
 	error_logger:info_msg("read performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
+
+perf_file_pointer(Exp, Length) ->
+	perf(Exp),
+	N = round(math:pow(10, Exp) / Length - 0.5),
+	Seq = lists:seq(1, N),
+	StartTime = now(),
+	lists:foldl(fun(_, I) -> {I2, _, _, _} = ?MODULE:file_pointer(iaf, I, Length), I2 end, 0, Seq),
+	T = timer:now_diff(now(), StartTime),
+	error_logger:info_msg("file_pointer performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
 
 
 

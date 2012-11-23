@@ -1,4 +1,4 @@
-{application, indexed_append_file,
+{application, appendix,
  [
   {description, ""},
   {vsn, "0.1.0"},
@@ -7,6 +7,6 @@
                   kernel,
                   stdlib
                  ]},
-  {mod, { indexed_append_file, []}},
+  {mod, { appendix, [appendix_server]}},
   {env, []}
  ]}.

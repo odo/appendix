@@ -1,4 +1,4 @@
--module(iaf_index_server).
+-module(appendix_server).
 -author('Florian Odronitz <odo@mac.com>').
 
 -ifdef(TEST).
@@ -45,13 +45,12 @@ trace_perf(Exp) ->
 	fprof:analyse().
 
 perf(Exp) ->
-	timer:apply_interval(2000, iaf_index_server, sync, [iaf]),
 	N = round(math:pow(10, Exp)),
 	Data = <<"See if we can put some data in here so it will be even remotely realistic.">>,
-	Put = fun() -> iaf_index_server:put(iaf, Data), n end,
+	Put = fun() -> ?MODULE:put(iaf, Data), n end,
 	StartTime = now(),
 	do_times(Put, N),
-	iaf_index_server:sync(iaf),
+	?MODULE:sync(iaf),
 	T = timer:now_diff(now(), StartTime),
 	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with ~p total.\n", [size(Data), (N / (T / math:pow(10, 6))), N]).
 
@@ -67,7 +66,7 @@ perf_read(Exp) ->
 	N = round(1 * math:pow(10, Exp)),
 	Seq = lists:seq(1, N),
 	StartTime = now(),
-	lists:foldl(fun(_, I) -> {I2, _} = iaf_index_server:next(iaf, I), I2 end, 0, Seq),
+	lists:foldl(fun(_, I) -> {I2, _} = ?MODULE:next(iaf, I), I2 end, 0, Seq),
 	T = timer:now_diff(now(), StartTime),
 	error_logger:info_msg("read performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
 
@@ -123,10 +122,10 @@ init([IndexFileName, DataFileName]) when is_binary(IndexFileName), is_binary(Dat
 	{Index, PointerLow, PointerHigh, Offset} = 
 	case file:read_file_info(DataFileName) of
 		{error, enoent} ->
-			error_logger:info_msg("Files don't exist, creating new ones. ", []),
+			error_logger:info_msg("Files don't exist, creating new ones.\n", []),
 			{bisect:new(?INDEXSIZE, ?OFFSETSIZE), undefined, undefined, 0};
 		{ok, DataFileInfo} ->
-			error_logger:info_msg("Files exist, loading...", []),
+			error_logger:info_msg("Files exist, loading...\n", []),
 			StartTime = now(),
 			{ok, IndexData} = file:read_file(IndexFileName),
 			IndexNew = bisect:new(?INDEXSIZE, ?OFFSETSIZE, IndexData),
@@ -327,7 +326,7 @@ iaf_test_() ->
 test_setup() ->
 	os:cmd("rm -rf " ++ ?TESTDB ++ "*"),
 	os:cmd("mkdir " ++ ?TESTDB),
-	iaf_index_server:start_link(iaf, ?TESTDB ++ "topic").
+	?MODULE:start_link(iaf, ?TESTDB ++ "topic").
  
 test_teardown(_) ->
 	stop(iaf).
@@ -378,13 +377,6 @@ test_data_slice() ->
 	I3  = Put(<<"ccc">>),
 	I4  = Put(<<"dddd">>),
 	I5  = Put(<<"eeeee">>),
-	Match = fun(Data, Pointer, {Pnt, FN, Pos, Len}) ->
-		?assertEqual(Pointer, Pnt),
-		{ok, F} = file:open(FN, [raw, binary]),
-		{ok, D} = file:pread(F, Pos, Len),
-		file:close(F),
-		?assertEqual(Data, D)
-	end,
 	?assertEqual({I3, <<"bbccc">>}, data_slice(iaf, I1, 2)),
 	?assertEqual({I4, <<"bbcccdddd">>}, data_slice(iaf, I1, 3)),
 	?assertEqual({I5, <<"bbcccddddeeeee">>}, data_slice(iaf, I1, 4)),
@@ -409,11 +401,11 @@ test_durability() ->
 		?assertEqual(not_found, Next(IW3))
 	end,
 	Verify(),
-	State1 = iaf_index_server:state(iaf),
-	iaf_index_server:stop(iaf),
+	State1 = state(iaf),
+	stop(iaf),
 	timer:sleep(100),
-	iaf_index_server:start_link(iaf, ?TESTDB ++ "topic"),
-	State2 = iaf_index_server:state(iaf),
+	start_link(iaf, ?TESTDB ++ "topic"),
+	State2 = state(iaf),
 	states_match(State1, State2),
 	Verify().
 

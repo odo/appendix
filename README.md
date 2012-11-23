@@ -14,12 +14,11 @@ mkdir /tmp/appendix
 make console
 erl -pz ebin deps/*/ebin
 1> appendix_server:start_link(as, "/tmp/appendix/test").
-
-=INFO REPORT==== 23-Nov-2012::14:53:50 ===
+{ok,<0.33.0>}
+=INFO REPORT==== 23-Nov-2012::19:29:12 ===
 appendix_server starting with {<<"/tmp/appendix/test_index">>,
                                <<"/tmp/appendix/test_data">>}.
-
-=INFO REPORT==== 23-Nov-2012::14:53:50 ===
+=INFO REPORT==== 23-Nov-2012::19:29:12 ===
 Files don't exist, creating new ones.
 {ok,<0.38.0>}
 ```
@@ -28,60 +27,60 @@ Retrieving data works by traversing the file using pointers.
 
 ```erlang
 2> appendix_server:put(as, <<"hello">>).
-1353678874767207
+1353695398451805
 ```
 Now we can step in and retrieve data:
 ```erlang
-3> {P, _} = appendix_server:next(as, 0).         
-{1353678976731776,<<"hello">>}
+3> {P, _} = appendix_server:next(as, 0).
+{1353695398451805,<<"hello">>}
 4> appendix_server:next(as, P).
 not_found
 5> appendix_server:put(as, <<"world">>).
-1353679063464459
+1353695444293392
 ```
 The intended way is to iterate by using the last retrieved key to get the next key-value pair:
 ```erlang
 6> AccFun = fun(_, {Pointer, Acc}) ->
-  {PointerNew, Data} = appendix_server:next(as, Pointer),
-  {PointerNew, [Data| Acc]}
-end.
-#Fun<erl_eval.12.111823515>
+6>   {PointerNew, Data} = appendix_server:next(as, Pointer),
+6>   {PointerNew, [Data| Acc]}
+6> end.
+#Fun<erl_eval.12.82930912>
 7> lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).
-{1353679186982689,[<<"world">>,<<"hello">>]}
+{1353695444293392,[<<"world">>,<<"hello">>]}
 ```
 The server can be suspended and restarted, rebuilding the index from the existing files:
 ```erlang
-8> appendix_server:stop(as).
+8> 
+appendix_server:stop(as).
 ok
 9> appendix_server:start_link(as, "/tmp/appendix/test").
-
-=INFO REPORT==== 23-Nov-2012::15:01:01 ===
+=INFO REPORT==== 23-Nov-2012::19:31:59 ===
 appendix_server starting with {<<"/tmp/appendix/test_index">>,
                                <<"/tmp/appendix/test_data">>}.
-=INFO REPORT==== 23-Nov-2012::15:01:01 ===
+=INFO REPORT==== 23-Nov-2012::19:31:59 ===
 Files exist, loading...
-=INFO REPORT==== 23-Nov-2012::15:01:01 ===
-loaded in 0.179 ms.
-{ok,<0.66.0>}
-10> lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).    
-{1353591937266001,[<<"world">>,<<"hello">>]}
+=INFO REPORT==== 23-Nov-2012::19:31:59 ===
+loaded in 0.379 ms.
+{ok,<0.42.0>}
+10> lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).
+{1353695444293392,[<<"world">>,<<"hello">>]}
 ```
 
 You can also retrieve multiple elements by asking for the file and the data's location:
 ```erlang
 11> [appendix_server:put(as, E)||E<-[<<"you">>,<<"are">>,<<"so">>,<<"wonderful">>,<<"!">>]].
-[1353679758861011,1353679758861040,1353679758861056,
- 1353679758861149,1353679758861175]
+[1353695605927655,1353695605927706,1353695605927767,
+ 1353695605927803,1353695605927848]
 12> {LastPointer, FileName, Position, Length} = appendix_server:file_pointer(as, 0, 3).
-{1353679758861011,<<"/tmp/appendix/test_data">>,0,13}
+{1353695605927655,<<"/tmp/appendix/test_data">>,0,13}
 ```
 
-What you got is a pointer to the last message in the requested range, the filename, the offset and the length of the data.
+What you got is an integer pointer to the last message in the requested range, the filename, the offset and the length of the data.
 You can use this to retrieve the data:
 
 ```erlang
 13> {ok, File} = file:open(FileName, [raw, binary]).
-{ok,{file_descriptor,prim_file,{#Port<0.817>,14}}}
+{ok,{file_descriptor,prim_file,{#Port<0.786>,13}}}
 14> {ok, Data} = file:pread(File, Position, Length).
 {ok,<<"helloworldyou">>}
 15> file:close(File).
@@ -93,9 +92,8 @@ Actally this is exactly what data_slice/3 does:
 16> {LastPointer, Data} =:= appendix_server:data_slice(as, 0, 3).
 true
 17> appendix_server:data_slice(as, LastPointer, 20).
-{1353679758861175,<<"aresowonderful!">>}
+{1353695605927848,<<"aresowonderful!">>}
 ```
-
 
 Performance:
 

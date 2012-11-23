@@ -12,7 +12,7 @@
 
 -behaviour (gen_server).
 
--record (state, {index_file, data_file, index, pointer_high, pointer_low, offset, write_buffer, index_write_buffer, write_buffer_size}).
+-record (state, {index_file, data_file, data_file_name, index, pointer_high, pointer_low, offset, write_buffer, index_write_buffer, write_buffer_size}).
 
 -define(INDEXSIZE, 7).
 -define(INDEXSIZEBITS, (?INDEXSIZE * 8)).
@@ -26,6 +26,8 @@
 	, stop/1
 	, put/2
 	, next/2
+	, file_pointer/3
+	, data_slice/3
 	, covers/2
 	, sync/1
 ]).
@@ -84,6 +86,20 @@ put(ServerName, Data) ->
 next(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {next, Pointer}).
 
+file_pointer(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_integer(Limit) andalso Limit >= 2 ->
+	gen_server:call(ServerName, {file_pointer, Pointer, Limit}).
+
+data_slice(ServerName, Pointer, Limit) ->
+	case gen_server:call(ServerName, {file_pointer, Pointer, Limit}) of
+		{LastPointer, FileName, Position, Length} -> 
+			{ok, File} = file:open(FileName, [raw, binary]),
+			{ok, Data} = file:pread(File, Position, Length),
+			file:close(File),
+			{LastPointer, Data};
+		not_found ->
+			not_found
+	end.
+
 covers(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {covers, Pointer}).
 
@@ -123,7 +139,7 @@ init([IndexFileName, DataFileName]) when is_binary(IndexFileName), is_binary(Dat
 	end,
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	{ok, #state{index_file = IndexFile, data_file = DataFile, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}}.
+	{ok, #state{index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}}.
 
 handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
 	PointerNow = now_pointer(),
@@ -165,6 +181,24 @@ handle_call({next, PointerMin}, _From, State = #state{index = Index, offset = Of
 	end,
 	{reply, Reply, StateNew};
 
+handle_call({file_pointer, Pointer, Limit}, _From, State = #state{index = Index, offset = Offset, data_file_name = DataFileName}) when is_integer(Pointer) andalso is_integer(Limit) ->
+	Reply =
+	case next_internal(Pointer, Index) of
+		{_, OffsetStart} ->
+			{LastPointer, OffsetEnd} =
+			case next_nth_and_one_before(Pointer, Index, Limit + 1) of
+				{{LP, _}, {_, O}} ->
+					{LP, O};
+				{{LP, _}, not_found} ->
+					{LP, Offset}
+			end,
+			{LastPointer, DataFileName, OffsetStart, OffsetEnd - OffsetStart};
+		not_found ->
+			not_found
+	end,
+	StateNew = sync_internal(State),
+	{reply, Reply, StateNew};
+
 handle_call({covers, Pointer}, _From, State = #state{pointer_low = PointerLow, pointer_high = PointerHigh}) when is_integer(Pointer) ->
 	Reply = Pointer >= PointerLow andalso Pointer =< PointerHigh,
 	{reply, Reply, State};
@@ -197,6 +231,35 @@ next_internal(PointerMin, Index) ->
 			{decode_pointer(PointerNew), decode_offset(OffesetNew)};
 		not_found ->
 			not_found
+	end.
+
+% Get the Nth KV starting from a pointer, and the one before.
+% If there are too few elements, return the last and not_found
+next_nth_and_one_before(PointerMin, Index, 1) ->
+	case bisect:next(Index, encode_pointer(PointerMin)) of
+		{PointerNew, OffesetNew} ->
+			{last, {decode_pointer(PointerNew), decode_offset(OffesetNew)}};
+		not_found ->
+			{last, not_found}
+	end;
+
+next_nth_and_one_before(PointerMin, Index, Steps) ->
+	case bisect:next(Index, encode_pointer(PointerMin)) of
+		{PointerNew, OffsetNew} ->
+			case next_nth_and_one_before(decode_pointer(PointerNew), Index, Steps - 1) of
+				{last, {Pointer, Offset}} ->
+					{{decode_pointer(PointerNew), decode_offset(OffsetNew)}, {Pointer, Offset}};
+				{last, not_found} ->
+					{{decode_pointer(PointerNew), decode_offset(OffsetNew)}, not_found};
+				Res = {{_, _}, {_, _}} ->
+					Res;
+				Res = {{_, _}, not_found} ->
+					Res;
+				{Pointer, _} ->
+					next_nth_and_one_before(decode_pointer(Pointer), Index, Steps - 1)
+			end;
+		not_found ->
+			{last, not_found}
 	end.
 
 now_pointer() ->
@@ -256,6 +319,8 @@ iaf_test_() ->
         , {"can tell if it covers some pointer", fun test_cover/0}
         , {"test put speed", timeout, 120, fun test_put_speed/0}
         , {"is durable", fun test_durability/0}
+        , {"returns correct file pointers", fun test_file_pointer/0}
+        , {"returns correct file slices", fun test_data_slice/0}
 		]}
 	].
 
@@ -282,6 +347,51 @@ test_put_next() ->
 	?assertEqual({IW2, D2}, Next(IW1)),
 	?assertEqual({IW3, D3}, Next(IW2)),
 	?assertEqual(not_found, Next(IW3)).
+
+test_file_pointer() ->
+	Put = fun(D) -> ?MODULE:put(iaf, D) end,
+	I1  = Put(<<"a">>),
+	_I2 = Put(<<"bb">>),
+	I3  = Put(<<"ccc">>),
+	I4  = Put(<<"dddd">>),
+	I5  = Put(<<"eeeee">>),
+	sync(iaf),
+	Match = fun(Data, Pointer, {Pnt, FN, Pos, Len}) ->
+		?assertEqual(Pointer, Pnt),
+		{ok, F} = file:open(FN, [raw, binary]),
+		{ok, D} = file:pread(F, Pos, Len),
+		file:close(F),
+		?assertEqual(Data, D)
+	end,
+	Match(<<"bbccc">>, I3, file_pointer(iaf, I1, 2)),
+	Match(<<"bbcccdddd">>, I4, file_pointer(iaf, I1, 3)),
+	Match(<<"bbcccddddeeeee">>, I5, file_pointer(iaf, I1, 4)),
+	Match(<<"bbcccddddeeeee">>, I5, file_pointer(iaf, I1, 5)),
+	Match(<<"bbcccddddeeeee">>, I5, file_pointer(iaf, I1, 6)),
+	Match(<<"eeeee">>, I5, file_pointer(iaf, I4, 2)),
+	?assertEqual(not_found, file_pointer(iaf, I5, 2)).
+
+test_data_slice() ->
+	Put = fun(D) -> ?MODULE:put(iaf, D) end,
+	I1  = Put(<<"a">>),
+	_I2 = Put(<<"bb">>),
+	I3  = Put(<<"ccc">>),
+	I4  = Put(<<"dddd">>),
+	I5  = Put(<<"eeeee">>),
+	Match = fun(Data, Pointer, {Pnt, FN, Pos, Len}) ->
+		?assertEqual(Pointer, Pnt),
+		{ok, F} = file:open(FN, [raw, binary]),
+		{ok, D} = file:pread(F, Pos, Len),
+		file:close(F),
+		?assertEqual(Data, D)
+	end,
+	?assertEqual({I3, <<"bbccc">>}, data_slice(iaf, I1, 2)),
+	?assertEqual({I4, <<"bbcccdddd">>}, data_slice(iaf, I1, 3)),
+	?assertEqual({I5, <<"bbcccddddeeeee">>}, data_slice(iaf, I1, 4)),
+	?assertEqual({I5, <<"bbcccddddeeeee">>}, data_slice(iaf, I1, 5)),
+	?assertEqual({I5, <<"bbcccddddeeeee">>}, data_slice(iaf, I1, 6)),
+	?assertEqual({I5, <<"eeeee">>}, data_slice(iaf, I4, 2)),
+	?assertEqual(not_found, data_slice(iaf, I5, 2)).
 
 test_durability() ->
 	Next = fun(I) -> ?MODULE:next(iaf, I) end,

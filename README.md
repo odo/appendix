@@ -47,7 +47,7 @@ The intended way is to iterate by using the last retrieved key to get the next k
 end.
 #Fun<erl_eval.12.111823515>
 7> lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).
-{1353679186982689,[<<"hello">>,<<"hello">>]}
+{1353679186982689,[<<"world">>,<<"hello">>]}
 ```
 The server can be suspended and restarted, rebuilding the index from the existing files:
 ```erlang

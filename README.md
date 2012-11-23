@@ -95,6 +95,33 @@ true
 {1353695605927848,<<"aresowonderful!">>}
 ```
 
+As you can see the data just one concatenated blob.
+To extract the parts you can roll your own format or you can use apndx which is build into put_enc/2, next_enc/2 and data_slice_enc/2:
+
+```erlang
+1> appendix_server:start_link(as_enc, "/tmp/appendix/test_enc").
+=INFO REPORT==== 23-Nov-2012::23:16:23 ===
+appendix_server starting with {<<"/tmp/appendix/test_enc_index">>,
+                               <<"/tmp/appendix/test_enc_data">>}.
+=INFO REPORT==== 23-Nov-2012::23:16:23 ===
+Files don't exist, creating new ones.
+{ok,<0.34.0>}
+2> Items = [<<"hello">>, <<"this">>, <<"is">>, <<"a">>, <<"message">>, <<".">>].
+[<<"hello">>,<<"this">>,<<"is">>,<<"a">>,<<"message">>,
+ <<".">>]
+3> [appendix_server:put_enc(as_enc, I)||I<-Items].
+[1353709036685162,1353709036685217,1353709036685245,
+ 1353709036685271,1353709036685292,1353709036685322]
+4> appendix_server:next_enc(as_enc, 0).
+{1353709036685162,<<"hello">>}
+5> {I, _} = appendix_server:data_slice_dec(as_enc, 0, 2). 
+{1353709036685217,[<<"hello">>,<<"this">>]}
+6> {I2, _} = appendix_server:data_slice_dec(as_enc, I, 1).      
+{1353709036685245,[<<"is">>]}
+7> appendix_server:data_slice_dec(as_enc, I2, 10).          
+{1353709036685322,[<<"a">>,<<"message">>,<<".">>]}
+```
+
 Performance:
 
 Writing is O(1), reading via next/2 is O(log n).

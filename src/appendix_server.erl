@@ -27,6 +27,7 @@
 	, put/2
 	, put_enc/2
 	, next/2
+	, next_enc/2
 	, file_pointer/3
 	, data_slice/3
 	, data_slice_dec/3
@@ -95,6 +96,15 @@ put(ServerName, Data) ->
 
 put_enc(ServerName, Data) ->
 	?MODULE:put(ServerName, apndx:encode(Data)).
+
+next_enc(ServerName, Pointer) when is_integer(Pointer) ->
+	 case next(ServerName, Pointer) of
+	{PointerNew, Data} ->
+		[DataDec] = apndx:decode(Data),
+		{PointerNew, DataDec};
+	not_found ->
+		not_found
+	end.
 
 next(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {next, Pointer}).

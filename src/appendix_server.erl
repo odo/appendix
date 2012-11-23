@@ -25,9 +25,11 @@
 	start_link/2
 	, stop/1
 	, put/2
+	, put_enc/2
 	, next/2
 	, file_pointer/3
 	, data_slice/3
+	, data_slice_dec/3
 	, covers/2
 	, sync/1
 ]).
@@ -91,6 +93,9 @@ start_link(ServerName, Path) ->
 put(ServerName, Data) ->
 	gen_server:call(ServerName, {put, Data}).
 
+put_enc(ServerName, Data) ->
+	?MODULE:put(ServerName, apndx:encode(Data)).
+
 next(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {next, Pointer}).
 
@@ -107,6 +112,10 @@ data_slice(ServerName, Pointer, Limit) ->
 		not_found ->
 			not_found
 	end.
+
+data_slice_dec(ServerName, Pointer, Limit) ->
+	{LastPointer, Data} = data_slice(ServerName, Pointer, Limit),
+	{LastPointer, apndx:decode(Data)}.
 
 covers(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {covers, Pointer}).

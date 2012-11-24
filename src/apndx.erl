@@ -9,11 +9,15 @@
 	,decode/1
 ]).
 
+-type data() :: binary().
+
+-spec encode(data()) -> data().
 encode(Data) ->
 	Size = byte_size(Data),
 	SizeBin = <<Size:32>>,
 	<< SizeBin/binary, Data/binary >>.
 
+-spec decode(data()) -> [data()].
 decode(<<>>) ->
 	[];
 

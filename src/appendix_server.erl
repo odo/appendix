@@ -35,6 +35,13 @@
 	, sync/1
 ]).
 
+-type server_name() :: atom() | pid().
+-type pointer() :: non_neg_integer().
+-type data() :: binary().
+-type limit() :: non_neg_integer().
+-type file_name() :: binary().
+-type offset() :: non_neg_integer().
+-type length() :: non_neg_integer().
 
 % callbacks
 -export ([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -88,15 +95,23 @@ perf_file_pointer(Exp, Length) ->
 %%% API
 %%%===================================================================
 
+-spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, Path) ->
 	gen_server:start_link({local, ServerName}, ?MODULE, [list_to_binary(Path ++ "_index"), list_to_binary(Path ++ "_data")], []).
 
+-spec put(server_name(), data()) -> pointer().
 put(ServerName, Data) ->
 	gen_server:call(ServerName, {put, Data}).
 
+-spec put_enc(server_name(), data()) -> pointer().
 put_enc(ServerName, Data) ->
 	?MODULE:put(ServerName, apndx:encode(Data)).
 
+-spec next(server_name(), pointer()) -> {pointer(), data()} | not_found.
+next(ServerName, Pointer) when is_integer(Pointer) ->
+	gen_server:call(ServerName, {next, Pointer}).
+
+-spec next_enc(server_name(), pointer()) -> {pointer(), data()} | not_found.
 next_enc(ServerName, Pointer) when is_integer(Pointer) ->
 	 case next(ServerName, Pointer) of
 	{PointerNew, Data} ->
@@ -106,12 +121,11 @@ next_enc(ServerName, Pointer) when is_integer(Pointer) ->
 		not_found
 	end.
 
-next(ServerName, Pointer) when is_integer(Pointer) ->
-	gen_server:call(ServerName, {next, Pointer}).
-
+-spec file_pointer(server_name(), pointer(), limit()) -> {pointer(), file_name(), offset(), length()} | not_found.
 file_pointer(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_integer(Limit) andalso Limit >= 2 ->
 	gen_server:call(ServerName, {file_pointer, Pointer, Limit}).
 
+-spec data_slice(server_name(), pointer(), limit()) -> {pointer(), data()} | not_found.
 data_slice(ServerName, Pointer, Limit) ->
 	case gen_server:call(ServerName, {file_pointer, Pointer, Limit}) of
 		{LastPointer, FileName, Position, Length} -> 
@@ -123,9 +137,14 @@ data_slice(ServerName, Pointer, Limit) ->
 			not_found
 	end.
 
+-spec data_slice_dec(server_name(), pointer(), limit()) -> {pointer(), data()} | not_found.
 data_slice_dec(ServerName, Pointer, Limit) ->
-	{LastPointer, Data} = data_slice(ServerName, Pointer, Limit),
-	{LastPointer, apndx:decode(Data)}.
+	case data_slice(ServerName, Pointer, Limit) of
+		{LastPointer, Data} ->
+			{LastPointer, apndx:decode(Data)};
+		not_found ->
+			not_found
+	end.
 
 covers(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {covers, Pointer}).
@@ -281,9 +300,7 @@ next_nth_and_one_before(PointerMin, Index, Steps) ->
 				Res = {{_, _}, {_, _}} ->
 					Res;
 				Res = {{_, _}, not_found} ->
-					Res;
-				{Pointer, _} ->
-					next_nth_and_one_before(decode_pointer(Pointer), Index, Steps - 1)
+					Res
 			end;
 		not_found ->
 			{last, not_found}

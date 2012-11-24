@@ -146,12 +146,15 @@ data_slice_dec(ServerName, Pointer, Limit) ->
 			not_found
 	end.
 
+-spec covers(server_name(), pointer()) -> true | false.
 covers(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {covers, Pointer}).
 
+-spec sync(server_name()) -> ok.
 sync(ServerName) ->
 	gen_server:call(ServerName, {sync}).
 
+-spec stop(server_name()) -> ok.
 stop(ServerName) ->
     gen_server:cast(ServerName, stop).
 

@@ -98,7 +98,7 @@ perf_file_pointer(Exp, Length) ->
 
 servers() ->
 	All = gproc:select([{{{p, l, appendix_server}, '_', '_'}, [], ['$$']}]),
-	[{Data, Pid}||[_, Pid, Data]<-All].
+	lists:sort(fun(A, B) -> A >= B end, [{Data, Pid}||[_, Pid, Data]<-All]).
 
 %%%===================================================================
 %%% API
@@ -304,7 +304,7 @@ advertise(State) ->
 				{p, l, appendix_server}, [
 					{pointer_low, State#state.pointer_low}
 					, {pointer_high, State#state.pointer_high}
-					, {offset, State#state.offset}
+					, {size, State#state.offset}
 			]);
 		false ->
 			noop
@@ -416,6 +416,7 @@ iaf_test_() ->
         , {"is durable", fun test_durability/0}
         , {"returns correct file pointers", fun test_file_pointer/0}
         , {"returns correct file slices", fun test_data_slice/0}
+        , {"works with gproc", fun test_grpoc/0}
 		]}
 	].
 
@@ -534,6 +535,39 @@ test_cover() ->
 	?assertEqual(T, Covers(I1)),	
 	?assertEqual(T, Covers(I2)),	
 	?assertEqual(F, Covers(I2+1)).
+
+test_grpoc() ->
+	application:start(gproc),
+	stop(iaf),
+	Path = ?TESTDB ++ "topic_gproc",
+	?MODULE:start_link(iaf1, Path ++ "1", [{use_gproc, true}]),
+	[S1] = appendix_server:servers(),
+	Get = fun(K, {Data, _Pid}) -> proplists:get_value(K, Data, not_found) end,
+	?assertEqual(undefined, Get(pointer_low,  S1)),
+	?assertEqual(undefined, Get(pointer_high, S1)),
+	?assertEqual(0, Get(size, 				  S1)),
+	I11 = ?MODULE:put(iaf1, <<"hello">>),
+	[S2] = appendix_server:servers(),
+	?assertEqual(I11, Get(pointer_low,  S2)),
+	?assertEqual(I11, Get(pointer_high, S2)),
+	?assertEqual(5, Get(size, 			S2)),
+	?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
+	[S13, S23] = appendix_server:servers(),
+	?assertEqual(undefined, Get(pointer_low,  S13)),
+	?assertEqual(undefined, Get(pointer_high, S13)),
+	?assertEqual(0, Get(size, 				  S13)),
+	?assertEqual(I11, Get(pointer_low,  S23)),
+	?assertEqual(I11, Get(pointer_high, S23)),
+	?assertEqual(5, Get(size, 			S23)),
+	I21 = ?MODULE:put(iaf2, <<"what up">>),
+	I22 = ?MODULE:put(iaf2, <<"over there?">>),
+	[S14, S24] = appendix_server:servers(),
+	?assertEqual(I21, Get(pointer_low,  S14)),
+	?assertEqual(I22, Get(pointer_high, S14)),
+	?assertEqual(18, Get(size, 				  S14)),
+	?assertEqual(I11, Get(pointer_low,  S24)),
+	?assertEqual(I11, Get(pointer_high, S24)),
+	?assertEqual(5, Get(size, 			S24)).
 
 test_put_speed() ->
 	N = round(1 * math:pow(10, 5)),

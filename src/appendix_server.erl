@@ -12,7 +12,7 @@
 
 -behaviour (gen_server).
 
--record (state, {index_file, data_file, data_file_name, index, pointer_high, pointer_low, offset, write_buffer, index_write_buffer, write_buffer_size}).
+-record (state, {index_file, data_file, data_file_name, index, pointer_high, pointer_low, offset, write_buffer, index_write_buffer, write_buffer_size, use_gproc}).
 
 -define(INDEXSIZE, 7).
 -define(INDEXSIZEBITS, (?INDEXSIZE * 8)).
@@ -22,7 +22,7 @@
 -define(SERVER, ?MODULE).
 
 -export([
-	start_link/2
+	start_link/2, start_link/3
 	, stop/1
 	, put/2
 	, put_enc/2
@@ -33,6 +33,7 @@
 	, data_slice_dec/3
 	, covers/2
 	, sync/1
+	, servers/0
 ]).
 
 -type server_name() :: atom() | pid().
@@ -62,7 +63,7 @@ perf(Exp) ->
 	do_times(Put, N),
 	?MODULE:sync(iaf),
 	T = timer:now_diff(now(), StartTime),
-	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with ~p total.\n", [size(Data), (N / (T / math:pow(10, 6))), N]).
+	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with ~p total.\n", [byte_size(Data), (N / (T / math:pow(10, 6))), N]).
 
 do_times(_, 0) ->
 	noop;
@@ -92,12 +93,24 @@ perf_file_pointer(Exp, Length) ->
 
 
 %%%===================================================================
+%%% Finding processes
+%%%===================================================================
+
+servers() ->
+	All = gproc:select([{{{p, l, appendix_server}, '_', '_'}, [], ['$$']}]),
+	[{Data, Pid}||[_, Pid, Data]<-All].
+
+%%%===================================================================
 %%% API
 %%%===================================================================
 
 -spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, Path) ->
-	gen_server:start_link({local, ServerName}, ?MODULE, [list_to_binary(Path ++ "_index"), list_to_binary(Path ++ "_data")], []).
+	start_link(ServerName, Path, []).
+
+-spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link(ServerName, Path, Options) ->
+	gen_server:start_link({local, ServerName}, ?MODULE, [list_to_binary(Path ++ "_index"), list_to_binary(Path ++ "_data"), Options], []).
 
 -spec put(server_name(), data()) -> pointer().
 put(ServerName, Data) ->
@@ -167,8 +180,9 @@ state(ServerName) ->
 %%% Callbacks
 %%%===================================================================
 
-init([IndexFileName, DataFileName]) when is_binary(IndexFileName), is_binary(DataFileName)->
-	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName}]),
+init([IndexFileName, DataFileName, Options]) when is_binary(IndexFileName), is_binary(DataFileName)->
+	UseGproc = proplists:get_value(use_gproc, Options, false),
+	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName, Options}]),
 	{Index, PointerLow, PointerHigh, Offset} = 
 	case file:read_file_info(DataFileName) of
 		{error, enoent} ->
@@ -179,16 +193,24 @@ init([IndexFileName, DataFileName]) when is_binary(IndexFileName), is_binary(Dat
 			StartTime = now(),
 			{ok, IndexData} = file:read_file(IndexFileName),
 			IndexNew = bisect:new(?INDEXSIZE, ?OFFSETSIZE, IndexData),
-			{PL, _} = bisect:first(IndexNew),
-			{PH, _} = bisect:last(IndexNew),
+			PL = case bisect:first(IndexNew) of
+				not_found -> undefined;
+				{P1, _} -> decode_pointer(P1)
+			end,
+			PH = case bisect:last(IndexNew) of
+				not_found -> undefined;
+				{P2, _} -> decode_pointer(P2)
+			end,
 			Off = DataFileInfo#file_info.size,
 			T = timer:now_diff(now(), StartTime),
-			error_logger:info_msg("loaded in ~p ms.\n", [(T / math:pow(10, 3))]),
-			{IndexNew, decode_pointer(PL), decode_pointer(PH), Off}
+			error_logger:info_msg("loaded index of ~p bytes in ~p ms.\n", [byte_size(IndexData), (T / math:pow(10, 3))]),
+			{IndexNew, PL, PH, Off}
 	end,
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	{ok, #state{index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}}.
+	StateNew = #state{index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
+	advertise(StateNew),
+	{ok, StateNew}.
 
 handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
 	PointerNow = now_pointer(),
@@ -200,7 +222,8 @@ handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, p
 		undefined -> PointerNow;
 		_ -> 		 PointerLow
 	end,
-	StateNew = State#state{index = IndexNew, offset = Offset + size(Data), pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
+	StateNew = State#state{index = IndexNew, offset = Offset + byte_size(Data), pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
+	advertise(StateNew),
 	StateSync = maybe_sync(StateNew),
 	{reply, PointerNow, StateSync};
 
@@ -269,6 +292,31 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
 	{ok, State}.
+
+%%%===================================================================
+%%% groc related
+%%%===================================================================
+
+advertise(State) ->
+	case State#state.use_gproc of
+		true ->
+			gproc_set(
+				{p, l, appendix_server}, [
+					{pointer_low, State#state.pointer_low}
+					, {pointer_high, State#state.pointer_high}
+					, {offset, State#state.offset}
+			]);
+		false ->
+			noop
+	end.
+
+gproc_set(K, V) ->
+	try
+		gproc:set_value(K, V)
+	catch
+		error:badarg ->
+			gproc:reg(K, V)
+	end.
 
 %%%===================================================================
 %%% Utilities
@@ -434,6 +482,9 @@ test_data_slice() ->
 	?assertEqual(not_found, data_slice(iaf, I5, 2)).
 
 test_durability() ->
+	stop(iaf),
+	timer:sleep(100),
+	start_link(iaf, ?TESTDB ++ "topic"),
 	Next = fun(I) -> ?MODULE:next(iaf, I) end,
 	Put = fun(D) -> ?MODULE:put(iaf, D) end,
 	D1 = <<"my_first_data">>,
@@ -492,7 +543,7 @@ test_put_speed() ->
 	StartTime = now(),
 	Fun(),
 	T = timer:now_diff(now(), StartTime),
-	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with total ~p.\n", [size(Data), (N / (T / math:pow(10, 6))), N]).
+	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with total ~p.\n", [byte_size(Data), (N / (T / math:pow(10, 6))), N]).
 
 % proper_test() ->
 %     ?assert(proper:quickcheck(?MODULE:proper_iaf())).

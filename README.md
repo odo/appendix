@@ -2,6 +2,8 @@
 
 appendix is an Erlang server to manage an append-only file of arbitrary data while maintaining an index of the parts added.
 
+The state of this library is experimental.
+
 Building:
 ```
 git clone git://github.com/odo/appendix.git

@@ -124,6 +124,7 @@ start_link(ServerName, PathPrefix) ->
 
 -spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, PathPrefix, Options) ->
+	lock_or_throw(PathPrefix),
 	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, Options], []).
 
 -spec put(server_name(), data()) -> pointer().
@@ -303,9 +304,11 @@ handle_call({sync}, _From, State) ->
 handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
 	file:delete(data_file_name(PathPrefix)),
 	file:delete(index_file_name(PathPrefix)),
+	unlock(PathPrefix),
     {stop, normal, State};
 
-handle_cast(stop, State) ->
+handle_cast(stop, State = #state{file_path_prefix = PathPrefix}) ->
+	unlock(PathPrefix),
     {stop, normal, sync_internal(State)}.
 
 handle_info(_Info, State) ->
@@ -351,6 +354,23 @@ index_file_name(Path) ->
 
 data_file_name(Path) ->
 	list_to_binary(Path ++ "_data").
+
+lock_file_name(Path) ->
+	list_to_binary(Path ++ "_lock").
+
+lock_or_throw(PathPrefix) ->
+	case file:read_file_info(lock_file_name(PathPrefix)) of
+		{error, enoent} ->
+			lock(PathPrefix);
+		{ok, _} ->
+			throw({error, {locked, PathPrefix}})
+	end.
+
+lock(PathPrefix) ->
+	file:open(lock_file_name(PathPrefix), [write]).
+
+unlock(PathPrefix) ->
+	file:delete(lock_file_name(PathPrefix)).
 
 next_internal(PointerMin, Index) ->
 	case bisect:next(Index, encode_pointer(PointerMin)) of
@@ -448,10 +468,12 @@ iaf_test_() ->
         , {"returns correct file slices", fun test_data_slice/0}
         , {"works with gproc", fun test_grpoc/0}
         , {"destroys", fun test_destroy/0}
+        , {"locks", fun test_locking/0}
 		]}
 	].
 
 test_setup() ->
+	application:start(sasl),
 	os:cmd("rm -rf " ++ ?TESTDB ++ "*"),
 	os:cmd("mkdir " ++ ?TESTDB),
 	?MODULE:start_link(iaf, ?TESTDB ++ "topic").
@@ -610,6 +632,9 @@ test_destroy() ->
 	timer:sleep(100),
 	start_link(iaf, ?TESTDB ++ "topic"),
 	?assertEqual(not_found, Next(0)).
+
+test_locking() ->
+	?assertException(throw, {error, {locked, ?TESTDB ++ "topic"}}, start_link(another_server, ?TESTDB ++ "topic")).
 
 test_put_speed() ->
 	N = round(1 * math:pow(10, 5)),

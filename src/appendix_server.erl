@@ -33,6 +33,7 @@
 	, data_slice_dec/3
 	, covers/2
 	, sync/1
+	, destroy/1
 	, servers/0
 ]).
 
@@ -105,12 +106,12 @@ servers() ->
 %%%===================================================================
 
 -spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link(ServerName, Path) ->
-	start_link(ServerName, Path, []).
+start_link(ServerName, PathPrefix) ->
+	start_link(ServerName, PathPrefix, []).
 
 -spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link(ServerName, Path, Options) ->
-	gen_server:start_link({local, ServerName}, ?MODULE, [list_to_binary(Path ++ "_index"), list_to_binary(Path ++ "_data"), Options], []).
+start_link(ServerName, PathPrefix, Options) ->
+	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, Options], []).
 
 -spec put(server_name(), data()) -> pointer().
 put(ServerName, Data) ->
@@ -171,6 +172,10 @@ sync(ServerName) ->
 stop(ServerName) ->
     gen_server:cast(ServerName, stop).
 
+-spec destroy(server_name()) -> ok.
+destroy(ServerName) ->
+    gen_server:cast(ServerName, destroy).
+
 -ifdef(TEST).
 state(ServerName) ->
     gen_server:call(ServerName, {state}).
@@ -180,8 +185,9 @@ state(ServerName) ->
 %%% Callbacks
 %%%===================================================================
 
-init([IndexFileName, DataFileName, Options]) when is_binary(IndexFileName), is_binary(DataFileName)->
+init([PathPrefix, Options]) when is_list(PathPrefix)->
 	UseGproc = proplists:get_value(use_gproc, Options, false),
+	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
 	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName, Options}]),
 	{Index, PointerLow, PointerHigh, Offset} = 
 	case file:read_file_info(DataFileName) of
@@ -321,6 +327,12 @@ gproc_set(K, V) ->
 %%%===================================================================
 %%% Utilities
 %%%===================================================================
+
+index_file_name(Path) ->
+	list_to_binary(Path ++ "_index").
+
+data_file_name(Path) ->
+	list_to_binary(Path ++ "_data").
 
 next_internal(PointerMin, Index) ->
 	case bisect:next(Index, encode_pointer(PointerMin)) of

@@ -12,7 +12,20 @@
 
 -behaviour (gen_server).
 
--record (state, {index_file, data_file, data_file_name, index, pointer_high, pointer_low, offset, write_buffer, index_write_buffer, write_buffer_size, use_gproc}).
+-record (state, {
+	file_path_prefix
+	, index_file
+	, data_file
+	, data_file_name
+	, index
+	, pointer_high
+	, pointer_low
+	, offset
+	, write_buffer
+	, index_write_buffer
+	, write_buffer_size
+	, use_gproc
+}).
 
 -define(INDEXSIZE, 7).
 -define(INDEXSIZEBITS, (?INDEXSIZE * 8)).
@@ -214,7 +227,7 @@ init([PathPrefix, Options]) when is_list(PathPrefix)->
 	end,
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	StateNew = #state{index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
+	StateNew = #state{file_path_prefix = PathPrefix, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
 	advertise(StateNew),
 	{ok, StateNew}.
 
@@ -281,11 +294,16 @@ handle_call({covers, Pointer}, _From, State = #state{pointer_low = PointerLow, p
 	Reply = Pointer >= PointerLow andalso Pointer =< PointerHigh,
 	{reply, Reply, State};
 
-handle_call({sync}, _From, State) ->
-	{reply, ok, sync_internal(State)};
-
 handle_call({state}, _From, State) ->
-	{reply, State, State}.
+	{reply, State, State};
+
+handle_call({sync}, _From, State) ->
+	{reply, ok, sync_internal(State)}.
+
+handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
+	file:delete(data_file_name(PathPrefix)),
+	file:delete(index_file_name(PathPrefix)),
+    {stop, normal, State};
 
 handle_cast(stop, State) ->
     {stop, normal, sync_internal(State)}.
@@ -429,6 +447,7 @@ iaf_test_() ->
         , {"returns correct file pointers", fun test_file_pointer/0}
         , {"returns correct file slices", fun test_data_slice/0}
         , {"works with gproc", fun test_grpoc/0}
+        , {"destroys", fun test_destroy/0}
 		]}
 	].
 
@@ -580,6 +599,17 @@ test_grpoc() ->
 	?assertEqual(I11, Get(pointer_low,  S24)),
 	?assertEqual(I11, Get(pointer_high, S24)),
 	?assertEqual(5, Get(size, 			S24)).
+
+test_destroy() ->
+	Next = fun(I) -> ?MODULE:next(iaf, I) end,
+	Put = fun(D) -> ?MODULE:put(iaf, D) end,
+	D1 = <<"my_data">>,
+	IW1 = Put(D1),
+	?assertEqual({IW1, D1}, Next(0)),
+	destroy(iaf),
+	timer:sleep(100),
+	start_link(iaf, ?TESTDB ++ "topic"),
+	?assertEqual(not_found, Next(0)).
 
 test_put_speed() ->
 	N = round(1 * math:pow(10, 5)),

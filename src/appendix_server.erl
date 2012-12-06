@@ -31,22 +31,22 @@
 -define(INDEXSIZEBITS, (?INDEXSIZE * 8)).
 -define(OFFSETSIZE, 5).
 -define(OFFSETSIZEBITS, (?OFFSETSIZE * 8)).
+-define(SIZESIZE, 4).
+-define(SIZESIZEBITS, (?SIZESIZE * 8)).
 -define(SYNCEVERY, 1000).
 -define(SERVER, ?MODULE).
 
 -export([
 	start_link/2, start_link/3
+	, start_link_anon/1, start_link_anon/2
 	, stop/1
+	, destroy/1
 	, put/2
-	, put_enc/2
 	, next/2
-	, next_enc/2
 	, file_pointer/3
 	, data_slice/3
-	, data_slice_dec/3
 	, covers/2
 	, sync/1
-	, destroy/1
 	, servers/0
 ]).
 
@@ -118,12 +118,21 @@ servers() ->
 %%% API
 %%%===================================================================
 
+-spec start_link_anon(list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link_anon(PathPrefix) when is_list(PathPrefix)->
+	start_link_anon(PathPrefix, []).
+
+-spec start_link_anon(list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link_anon(PathPrefix, Options) when is_list(PathPrefix), is_list(Options) ->
+	lock_or_throw(PathPrefix),
+	gen_server:start_link(?MODULE, [PathPrefix, Options], []).
+
 -spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link(ServerName, PathPrefix) ->
+start_link(ServerName, PathPrefix) when is_atom(ServerName), is_list(PathPrefix)->
 	start_link(ServerName, PathPrefix, []).
 
 -spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link(ServerName, PathPrefix, Options) ->
+start_link(ServerName, PathPrefix, Options) when is_atom(ServerName), is_list(PathPrefix), is_list(Options) ->
 	lock_or_throw(PathPrefix),
 	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, Options], []).
 
@@ -131,23 +140,9 @@ start_link(ServerName, PathPrefix, Options) ->
 put(ServerName, Data) ->
 	gen_server:call(ServerName, {put, Data}).
 
--spec put_enc(server_name(), data()) -> pointer().
-put_enc(ServerName, Data) ->
-	?MODULE:put(ServerName, apndx:encode(Data)).
-
 -spec next(server_name(), pointer()) -> {pointer(), data()} | not_found.
 next(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {next, Pointer}).
-
--spec next_enc(server_name(), pointer()) -> {pointer(), data()} | not_found.
-next_enc(ServerName, Pointer) when is_integer(Pointer) ->
-	 case next(ServerName, Pointer) of
-	{PointerNew, Data} ->
-		[DataDec] = apndx:decode(Data),
-		{PointerNew, DataDec};
-	not_found ->
-		not_found
-	end.
 
 -spec file_pointer(server_name(), pointer(), limit()) -> {pointer(), file_name(), offset(), length()} | not_found.
 file_pointer(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_integer(Limit) andalso Limit >= 2 ->
@@ -156,20 +151,11 @@ file_pointer(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_int
 -spec data_slice(server_name(), pointer(), limit()) -> {pointer(), data()} | not_found.
 data_slice(ServerName, Pointer, Limit) ->
 	case gen_server:call(ServerName, {file_pointer, Pointer, Limit}) of
-		{LastPointer, FileName, Position, Length} -> 
+		{FileName, Position, Length} -> 
 			{ok, File} = file:open(FileName, [raw, binary]),
 			{ok, Data} = file:pread(File, Position, Length),
 			file:close(File),
-			{LastPointer, Data};
-		not_found ->
-			not_found
-	end.
-
--spec data_slice_dec(server_name(), pointer(), limit()) -> {pointer(), data()} | not_found.
-data_slice_dec(ServerName, Pointer, Limit) ->
-	case data_slice(ServerName, Pointer, Limit) of
-		{LastPointer, Data} ->
-			{LastPointer, apndx:decode(Data)};
+			decode_data(Data);
 		not_found ->
 			not_found
 	end.
@@ -237,12 +223,13 @@ handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, p
 	IndexData = encode_pointer_offset(PointerNow, Offset),
 	IndexNew = bisect:append(Index, IndexData),
 	IndexWriteBufferNew = <<IndexWriteBuffer/binary, IndexData/binary>>,
-	WriteBufferNew = <<WriteBuffer/binary, Data/binary>>,
+	DataEncoded = encode_data(PointerNow, Data),
+	WriteBufferNew = <<WriteBuffer/binary, DataEncoded/binary>>,
 	PointerLowNew = case PointerLow of
 		undefined -> PointerNow;
 		_ -> 		 PointerLow
 	end,
-	StateNew = State#state{index = IndexNew, offset = Offset + byte_size(Data), pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
+	StateNew = State#state{index = IndexNew, offset = Offset + byte_size(DataEncoded), pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
 	advertise(StateNew),
 	StateSync = maybe_sync(StateNew),
 	{reply, PointerNow, StateSync};
@@ -259,13 +246,15 @@ handle_call({next, PointerMin}, _From, State = #state{index = Index, offset = Of
 					Offset - DataOffset
 			end,
 			case file:pread(DataFile, DataOffset, Length) of
-				{ok ,Data} ->
+				{ok, DataRaw} ->
+					[{PointerNew, Data}] = decode_data(DataRaw),
 					{{PointerNew, Data}, State};
 				eof ->
 					% the in-memory index might point to data which is not
 					% syced to disk yet. we give it a try
 					StateSynced = sync_internal(State),
-					{ok, Data} = file:pread(DataFile, DataOffset, Length),
+					{ok, DataRaw} = file:pread(DataFile, DataOffset, Length),
+					[{PointerNew, Data}] = decode_data(DataRaw),
 					{{PointerNew, Data}, StateSynced}
 			end;
 		not_found ->
@@ -277,14 +266,12 @@ handle_call({file_pointer, Pointer, Limit}, _From, State = #state{index = Index,
 	Reply =
 	case next_internal(Pointer, Index) of
 		{_, OffsetStart} ->
-			{LastPointer, OffsetEnd} =
-			case next_nth_and_one_before(Pointer, Index, Limit + 1) of
-				{{LP, _}, {_, O}} ->
-					{LP, O};
-				{{LP, _}, not_found} ->
-					{LP, Offset}
-			end,
-			{LastPointer, DataFileName, OffsetStart, OffsetEnd - OffsetStart};
+			case bisect:next_nth(Index, encode_pointer(Pointer), Limit + 1) of
+				{_, OffsetEnd} ->
+					{DataFileName, OffsetStart, decode_offset(OffsetEnd) - OffsetStart};
+				not_found -> 
+					{DataFileName, OffsetStart, Offset - OffsetStart}
+			end;
 		not_found ->
 			not_found
 	end,
@@ -380,36 +367,24 @@ next_internal(PointerMin, Index) ->
 			not_found
 	end.
 
-% Get the Nth KV starting from a pointer, and the one before.
-% If there are too few elements, return the last and not_found
-next_nth_and_one_before(PointerMin, Index, 1) ->
-	case bisect:next(Index, encode_pointer(PointerMin)) of
-		{PointerNew, OffesetNew} ->
-			{last, {decode_pointer(PointerNew), decode_offset(OffesetNew)}};
-		not_found ->
-			{last, not_found}
-	end;
-
-next_nth_and_one_before(PointerMin, Index, Steps) ->
-	case bisect:next(Index, encode_pointer(PointerMin)) of
-		{PointerNew, OffsetNew} ->
-			case next_nth_and_one_before(decode_pointer(PointerNew), Index, Steps - 1) of
-				{last, {Pointer, Offset}} ->
-					{{decode_pointer(PointerNew), decode_offset(OffsetNew)}, {Pointer, Offset}};
-				{last, not_found} ->
-					{{decode_pointer(PointerNew), decode_offset(OffsetNew)}, not_found};
-				Res = {{_, _}, {_, _}} ->
-					Res;
-				Res = {{_, _}, not_found} ->
-					Res
-			end;
-		not_found ->
-			{last, not_found}
-	end.
-
 now_pointer() ->
 	{MegaSecs,Secs,MicroSecs} = now(),
     (MegaSecs*1000000 + Secs)*1000000 + MicroSecs.
+
+encode_data(Pointer, Data) ->
+	PointerEncoded = encode_pointer(Pointer),
+	Size = byte_size(Data),
+	SizeBin = <<Size:?SIZESIZEBITS>>,
+	<< PointerEncoded/binary, SizeBin/binary, Data/binary >>.
+
+decode_data(<<>>) ->
+	[];
+
+decode_data(Data) ->
+	<< Pointer:?INDEXSIZE/binary, SizeBin:?SIZESIZE/binary, Rest1/binary>> = Data,
+	Size = binary:decode_unsigned(SizeBin),
+	<< Item:Size/binary, Rest2/binary>> = Rest1,
+	[{decode_pointer(Pointer), Item} | decode_data(Rest2)].
 
 encode_pointer_offset(I, O) ->
 	IEnc = encode_pointer(I),
@@ -464,7 +439,6 @@ iaf_test_() ->
         , {"can tell if it covers some pointer", fun test_cover/0}
         , {"test put speed", timeout, 120, fun test_put_speed/0}
         , {"is durable", fun test_durability/0}
-        , {"returns correct file pointers", fun test_file_pointer/0}
         , {"returns correct file slices", fun test_data_slice/0}
         , {"works with gproc", fun test_grpoc/0}
         , {"destroys", fun test_destroy/0}
@@ -497,42 +471,19 @@ test_put_next() ->
 	?assertEqual({IW3, D3}, Next(IW2)),
 	?assertEqual(not_found, Next(IW3)).
 
-test_file_pointer() ->
-	Put = fun(D) -> ?MODULE:put(iaf, D) end,
-	I1  = Put(<<"a">>),
-	_I2 = Put(<<"bb">>),
-	I3  = Put(<<"ccc">>),
-	I4  = Put(<<"dddd">>),
-	I5  = Put(<<"eeeee">>),
-	sync(iaf),
-	Match = fun(Data, Pointer, {Pnt, FN, Pos, Len}) ->
-		?assertEqual(Pointer, Pnt),
-		{ok, F} = file:open(FN, [raw, binary]),
-		{ok, D} = file:pread(F, Pos, Len),
-		file:close(F),
-		?assertEqual(Data, D)
-	end,
-	Match(<<"bbccc">>, I3, file_pointer(iaf, I1, 2)),
-	Match(<<"bbcccdddd">>, I4, file_pointer(iaf, I1, 3)),
-	Match(<<"bbcccddddeeeee">>, I5, file_pointer(iaf, I1, 4)),
-	Match(<<"bbcccddddeeeee">>, I5, file_pointer(iaf, I1, 5)),
-	Match(<<"bbcccddddeeeee">>, I5, file_pointer(iaf, I1, 6)),
-	Match(<<"eeeee">>, I5, file_pointer(iaf, I4, 2)),
-	?assertEqual(not_found, file_pointer(iaf, I5, 2)).
-
 test_data_slice() ->
 	Put = fun(D) -> ?MODULE:put(iaf, D) end,
 	I1  = Put(<<"a">>),
-	_I2 = Put(<<"bb">>),
+	I2 = Put(<<"bb">>),
 	I3  = Put(<<"ccc">>),
 	I4  = Put(<<"dddd">>),
 	I5  = Put(<<"eeeee">>),
-	?assertEqual({I3, <<"bbccc">>}, data_slice(iaf, I1, 2)),
-	?assertEqual({I4, <<"bbcccdddd">>}, data_slice(iaf, I1, 3)),
-	?assertEqual({I5, <<"bbcccddddeeeee">>}, data_slice(iaf, I1, 4)),
-	?assertEqual({I5, <<"bbcccddddeeeee">>}, data_slice(iaf, I1, 5)),
-	?assertEqual({I5, <<"bbcccddddeeeee">>}, data_slice(iaf, I1, 6)),
-	?assertEqual({I5, <<"eeeee">>}, data_slice(iaf, I4, 2)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}], data_slice(iaf, I1, 2)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}], data_slice(iaf, I1, 3)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], data_slice(iaf, I1, 4)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], data_slice(iaf, I1, 5)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], data_slice(iaf, I1, 6)),
+	?assertEqual([{I5, <<"eeeee">>}], data_slice(iaf, I4, 2)),
 	?assertEqual(not_found, data_slice(iaf, I5, 2)).
 
 test_durability() ->
@@ -590,6 +541,7 @@ test_cover() ->
 	?assertEqual(F, Covers(I2+1)).
 
 test_grpoc() ->
+	Overhaed = ?INDEXSIZE + ?SIZESIZE,
 	application:start(gproc),
 	stop(iaf),
 	Path = ?TESTDB ++ "topic_gproc",
@@ -603,7 +555,7 @@ test_grpoc() ->
 	[S2] = appendix_server:servers(),
 	?assertEqual(I11, Get(pointer_low,  S2)),
 	?assertEqual(I11, Get(pointer_high, S2)),
-	?assertEqual(5, Get(size, 			S2)),
+	?assertEqual(5 + Overhaed, Get(size, 			S2)),
 	?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
 	[S13, S23] = appendix_server:servers(),
 	?assertEqual(undefined, Get(pointer_low,  S13)),
@@ -611,16 +563,16 @@ test_grpoc() ->
 	?assertEqual(0, Get(size, 				  S13)),
 	?assertEqual(I11, Get(pointer_low,  S23)),
 	?assertEqual(I11, Get(pointer_high, S23)),
-	?assertEqual(5, Get(size, 			S23)),
+	?assertEqual(5 + Overhaed, Get(size, 			S23)),
 	I21 = ?MODULE:put(iaf2, <<"what up">>),
 	I22 = ?MODULE:put(iaf2, <<"over there?">>),
 	[S14, S24] = appendix_server:servers(),
 	?assertEqual(I21, Get(pointer_low,  S14)),
 	?assertEqual(I22, Get(pointer_high, S14)),
-	?assertEqual(18, Get(size, 				  S14)),
+	?assertEqual(18 + 2 * Overhaed, Get(size, 				  S14)),
 	?assertEqual(I11, Get(pointer_low,  S24)),
 	?assertEqual(I11, Get(pointer_high, S24)),
-	?assertEqual(5, Get(size, 			S24)).
+	?assertEqual(5 + Overhaed, Get(size, 			S24)).
 
 test_destroy() ->
 	Next = fun(I) -> ?MODULE:next(iaf, I) end,

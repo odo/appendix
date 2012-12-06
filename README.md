@@ -73,8 +73,8 @@ You can also retrieve multiple elements by asking for the file and the data's lo
 11> [appendix_server:put(as, E)||E<-[<<"you">>,<<"are">>,<<"so">>,<<"wonderful">>,<<"!">>]].
 [1353695605927655,1353695605927706,1353695605927767,
  1353695605927803,1353695605927848]
-12> {LastPointer, FileName, Position, Length} = appendix_server:file_pointer(as, 0, 3).
-{1353695605927655,<<"/tmp/appendix/test_data">>,0,13}
+12> {FileName, Position, Length} = appendix_server:file_pointer(as, 0, 3).
+{<<"/tmp/appendix/test_data">>,0,13}
 ```
 
 What you got is an integer pointer to the last message in the requested range, the filename, the offset and the length of the data.

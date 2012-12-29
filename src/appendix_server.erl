@@ -187,6 +187,7 @@ state(ServerName) ->
 %%%===================================================================
 
 init([PathPrefix, Options]) when is_list(PathPrefix)->
+	process_flag(trap_exit, true),
 	UseGproc = proplists:get_value(use_gproc, Options, false),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
 	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName, Options}]),

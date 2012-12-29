@@ -170,7 +170,8 @@ sync(ServerName) ->
 
 -spec stop(server_name()) -> ok.
 stop(ServerName) ->
-    gen_server:cast(ServerName, stop).
+    gen_server:call(ServerName, stop).
+
 
 -spec destroy(server_name()) -> ok.
 destroy(ServerName) ->
@@ -286,22 +287,30 @@ handle_call({state}, _From, State) ->
 	{reply, State, State};
 
 handle_call({sync}, _From, State) ->
-	{reply, ok, sync_internal(State)}.
+	{reply, ok, sync_internal(State)};
+
+handle_call(stop, _From, State) ->
+    {stop, normal, ok, State}.
 
 handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
 	file:delete(data_file_name(PathPrefix)),
 	file:delete(index_file_name(PathPrefix)),
 	unlock(PathPrefix),
-    {stop, normal, State};
-
-handle_cast(stop, State = #state{file_path_prefix = PathPrefix}) ->
-	unlock(PathPrefix),
-    {stop, normal, sync_internal(State)}.
+    {stop, normal, State}.
 
 handle_info(_Info, State) ->
 	{noreply, State}.
-	
-terminate(_Reason, _State) ->
+
+
+terminate(shutdown, State) ->
+	cleanup(State),
+	ok;
+
+terminate(normal, State) ->
+	cleanup(State),
+	ok;
+
+terminate(_, _) ->
 	ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -336,6 +345,11 @@ gproc_set(K, V) ->
 %%% Utilities
 %%%===================================================================
 
+cleanup(State = #state{file_path_prefix = PathPrefix}) ->
+	StateNew = sync_internal(State),
+	unlock(PathPrefix),
+	StateNew.
+
 index_file_name(Path) ->
 	list_to_binary(Path ++ "_index").
 
@@ -357,6 +371,7 @@ lock(PathPrefix) ->
 	file:open(lock_file_name(PathPrefix), [write]).
 
 unlock(PathPrefix) ->
+	error_logger:info_msg("unlocking ~p\n", [PathPrefix]),
 	file:delete(lock_file_name(PathPrefix)).
 
 next_internal(PointerMin, Index) ->
@@ -453,7 +468,12 @@ test_setup() ->
 	?MODULE:start_link(iaf, ?TESTDB ++ "topic").
  
 test_teardown(_) ->
-	stop(iaf).
+	case whereis(iaf) of
+		undefined ->
+			noop;
+		_ ->
+			stop(iaf)
+	end.
 
 test_put_next() ->
 	Next = fun(I) -> ?MODULE:next(iaf, I) end,

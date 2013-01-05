@@ -432,11 +432,8 @@ sync_internal(State = #state{data_file = DataFile, index_file = IndexFile, write
 		0 ->
 			State;
 		_ ->
-			StartTime = now(),
 			file:write(DataFile, WriteBuffer),
 			file:write(IndexFile, IndexWriteBuffer),
-			T = timer:now_diff(now(), StartTime),
-			error_logger:info_msg("syncing of ~p messages took ~p ms.\n", [WriteBufferSize, (T / math:pow(10, 3))]),
 			State#state{write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
 	end.
 
@@ -459,6 +456,7 @@ iaf_test_() ->
         , {"works with gproc", fun test_grpoc/0}
         , {"destroys", fun test_destroy/0}
         , {"locks", fun test_locking/0}
+        , {"properties", timeout, 1200, fun proper_test/0}
 		]}
 	].
 
@@ -619,29 +617,88 @@ test_put_speed() ->
 	T = timer:now_diff(now(), StartTime),
 	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with total ~p.\n", [byte_size(Data), (N / (T / math:pow(10, 6))), N]).
 
-% proper_test() ->
-%     ?assert(proper:quickcheck(?MODULE:proper_iaf())).
+-record(proper_state, {data = []}).
 
-% proper_iaf() ->
-%     ?FORALL(Cmds, commands(?MODULE),
-%             ?TRAPEXIT(
-%                begin
-%                    test_setup(),
-%                    {History, State, Result} = run_commands(?MODULE, Cmds),
-%                    test_teardown('_'),
-%                    ?WHENFAIL(io:format("History: ~p\nState: ~p\nResult: ~p\n",
-%                                        [History, State, Result]),
-%                              aggregate(command_names(Cmds), Result =:= ok))
-%                 end)).
+data_slice_size() ->
+	elements([2, 10, 100, 1000]).
 
-% initial_state() ->
-%     [].
+proper_test() ->
+    ?assert(proper:quickcheck(?MODULE:proper_appendix(), [{to_file, user}, {numtests, 100}])).
 
-% command(_S) ->
-%     oneof([
-%     	{call, ?MODULE, put, [prop, binary()]}
-%         , {call, ?MODULE, next, [prop, integer()]},
-% 	]).
+proper_appendix() ->
+    ?FORALL(Cmds, commands(?MODULE),
+            ?TRAPEXIT(
+               begin
+                   test_setup(),
+                   {History, State, Result} = run_commands(?MODULE, Cmds),
+                   test_teardown('_'),
+                   ?WHENFAIL(io:format("History: ~p\nState: ~p\nResult: ~p\n",
+                                       [History, State, Result]),
+                             aggregate(command_names(Cmds), Result =:= ok))
+                end)).
 
+initial_state() ->
+     #proper_state{}.
+
+command(_S) ->
+    oneof([
+    	{call, ?MODULE, proper_test_put, [binary()]}
+    	, {call, ?MODULE, proper_test_sync, []}
+        , {call, ?MODULE, proper_test_get_all, []}
+        , {call, ?MODULE, proper_test_data_slice_all, [data_slice_size()]}
+	]).
+
+precondition(_, _) ->
+    true.
+
+next_state(S, _, {call, _, proper_test_put, [Data]}) ->
+    S#proper_state{data = [Data|S#proper_state.data]};
+
+next_state(S, _, _) ->
+    S.
+
+postcondition(_, {call, _, proper_test_put, [_]}, Result) ->
+    is_integer(Result);
+
+postcondition(_, {call, _, proper_test_sync, []}, Result) ->
+    Result =:= ok;
+
+postcondition(S, {call, _, proper_test_get_all, []}, Result) ->
+    Result =:= S#proper_state.data;
+ 
+postcondition(S, {call, _, proper_test_data_slice_all, [_]}, Result) ->
+    Result =:= S#proper_state.data.
+ 
+proper_test_put(Data) ->
+	?MODULE:put(iaf, Data).
+
+proper_test_sync() ->
+	?MODULE:sync(iaf).
+
+proper_test_get_all() ->
+	lists:reverse(proper_test_get_all(0)).
+
+proper_test_get_all(Pointer) ->
+	case ?MODULE:next(iaf, Pointer) of
+		{PointerNew, Data} ->
+			[Data|proper_test_get_all(PointerNew)];
+		not_found ->
+			[]
+	end.
+
+proper_test_data_slice_all(SliceSize) ->
+	lists:reverse(lists:flatten(proper_test_data_slice_all(0, SliceSize))).
+
+proper_test_data_slice_all(Pointer, SliceSize) ->
+	case ?MODULE:data_slice(iaf, Pointer, SliceSize) of
+		not_found ->
+			[];
+		[] ->
+			[];
+		Data ->
+			{PointerLast, _} = lists:last(Data),
+			Data2 = [D||{_, D} <- Data],
+			[Data2|proper_test_data_slice_all(PointerLast, SliceSize)]
+	end.
 
 -endif.

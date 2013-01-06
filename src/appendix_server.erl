@@ -124,10 +124,10 @@ server(Pointer) ->
 		['$1']}],
 		1) of
 		'$end_of_table' ->
-			% there was no server for upstream pointer, so we return the largest 
+			% there was no server for upstream pointers, so we return the largest which is downstream
 			case gproc:select(
 				{l,p},
-				[{{{p, l, appendix_server}, '$1', [{pointer_low, '_'}, {pointer_high, '$2'}, '_']},
+				[{{{p, l, appendix_server}, '$1', [{pointer_low, '_'}, {pointer_high, '_'}, '_']},
 				[],
 				['$1']}]) of
 					[] ->

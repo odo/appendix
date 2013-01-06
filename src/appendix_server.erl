@@ -14,6 +14,7 @@
 
 -record (state, {
 	file_path_prefix
+	, id
 	, index_file
 	, data_file
 	, data_file_name
@@ -38,6 +39,7 @@
 
 -export([
 	start_link/2, start_link/3
+	, start_link_with_id/2, start_link_with_id/3
 	, start_link_anon/1, start_link_anon/2
 	, stop/1
 	, destroy/1
@@ -112,14 +114,20 @@ perf_file_pointer(Exp, Length) ->
 %%%===================================================================
 
 servers() ->
-	All = gproc:select([{{{p, l, appendix_server}, '_', '_'}, [], ['$$']}]),
+	servers(undefined).
+
+servers(ID) ->
+	All = gproc:select([{{gproc_key(ID), '_', '_'}, [], ['$$']}]),
 	lists:sort(fun(A, B) -> A >= B end, [{Data, Pid}||[_, Pid, Data]<-All]).
 
 % the server that serves the pointers larger than the given one
 server(Pointer) ->
+	server(Pointer, undefined).
+
+server(Pointer, ID) ->
 	case gproc:select(
 		{l,p},
-		[{{{p, l, appendix_server}, '$1', [{pointer_low, '_'}, {pointer_high, '$2'}, '_']},
+		[{{gproc_key(ID), '$1', [{pointer_low, '_'}, {pointer_high, '$2'}, '_']},
 		[{'>=',  '$2', Pointer + 1}, {'=/=', '$2', undefined}],
 		['$1']}],
 		1) of
@@ -127,7 +135,7 @@ server(Pointer) ->
 			% there was no server for upstream pointers, so we return the largest which is downstream
 			case gproc:select(
 				{l,p},
-				[{{{p, l, appendix_server}, '$1', [{pointer_low, '_'}, {pointer_high, '_'}, '_']},
+				[{{gproc_key(ID), '$1', [{pointer_low, '_'}, {pointer_high, '_'}, '_']},
 				[],
 				['$1']}]) of
 					[] ->
@@ -143,6 +151,15 @@ server(Pointer) ->
 %%% API
 %%%===================================================================
 
+-spec start_link_with_id(list(), term()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link_with_id(PathPrefix, ID) when is_list(PathPrefix)->
+	start_link_with_id(PathPrefix, ID, []).
+
+-spec start_link_with_id(list(), term(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link_with_id(PathPrefix, ID, Options) when is_list(PathPrefix), is_list(Options) ->
+	lock_or_throw(PathPrefix),
+	gen_server:start_link(?MODULE, [PathPrefix, ID, Options], []).
+
 -spec start_link_anon(list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link_anon(PathPrefix) when is_list(PathPrefix)->
 	start_link_anon(PathPrefix, []).
@@ -150,7 +167,7 @@ start_link_anon(PathPrefix) when is_list(PathPrefix)->
 -spec start_link_anon(list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link_anon(PathPrefix, Options) when is_list(PathPrefix), is_list(Options) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link(?MODULE, [PathPrefix, Options], []).
+	gen_server:start_link(?MODULE, [PathPrefix, undefined, Options], []).
 
 -spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, PathPrefix) when is_atom(ServerName), is_list(PathPrefix)->
@@ -159,7 +176,7 @@ start_link(ServerName, PathPrefix) when is_atom(ServerName), is_list(PathPrefix)
 -spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, PathPrefix, Options) when is_atom(ServerName), is_list(PathPrefix), is_list(Options) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, Options], []).
+	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, undefined, Options], []).
 
 -spec put(server_name(), data()) -> pointer().
 put(ServerName, Data) ->
@@ -211,7 +228,7 @@ state(ServerName) ->
 %%% Callbacks
 %%%===================================================================
 
-init([PathPrefix, Options]) when is_list(PathPrefix)->
+init([PathPrefix, ID, Options]) when is_list(PathPrefix)->
 	process_flag(trap_exit, proplists:get_value(trap_exit, Options, false)),
 	UseGproc = proplists:get_value(use_gproc, Options, false),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
@@ -241,7 +258,7 @@ init([PathPrefix, Options]) when is_list(PathPrefix)->
 	end,
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	StateNew = #state{file_path_prefix = PathPrefix, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
+	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
 	advertise(StateNew),
 	{ok, StateNew}.
 
@@ -350,7 +367,7 @@ advertise(State) ->
 	case State#state.use_gproc of
 		true ->
 			gproc_set(
-				{p, l, appendix_server}, [
+				gproc_key(State#state.id), [
 					{pointer_low, State#state.pointer_low}
 					, {pointer_high, State#state.pointer_high}
 					, {size, State#state.offset}
@@ -366,6 +383,9 @@ gproc_set(K, V) ->
 		error:badarg ->
 			gproc:reg(K, V)
 	end.
+
+gproc_key(ID) ->
+	{p, l, {appendix_server, ID}}.
 
 %%%===================================================================
 %%% Utilities
@@ -480,6 +500,7 @@ iaf_test_() ->
         , {"returns correct file slices", fun test_data_slice/0}
         , {"works with gproc", fun test_gproc/0}
         , {"works with gproc2", fun test_gproc2/0}
+        , {"servers can be seperated by name", fun test_server_naming/0}
         , {"destroys", fun test_destroy/0}
         , {"locks", fun test_locking/0}
         , {"properties", timeout, 1200, fun proper_test/0}
@@ -653,12 +674,36 @@ test_gproc2() ->
 	destroy(iaf1),
 	destroy(iaf2).
 
+test_server_naming() ->
+	application:start(gproc),
+	stop(iaf),
+	Path = ?TESTDB ++ "topic_naming_test",
+	?assertEqual([], gather_all(test1)),
+	?assertEqual([], gather_all(test2)),
+	?MODULE:start_link_with_id(Path ++ "1", test1, [{use_gproc, true}]),
+	?MODULE:start_link_with_id(Path ++ "21", test2, [{use_gproc, true}]),
+	?MODULE:put(server(now_pointer(), test1), <<"hello">>),
+	?MODULE:put(server(now_pointer(), test2), <<"good bye">>),
+	?assertEqual([<<"hello">>], gather_all(test1)),
+	?assertEqual([<<"good bye">>], gather_all(test2)),
+	?MODULE:start_link_with_id(Path ++ "2", test1, [{use_gproc, true}]),
+	?MODULE:start_link_with_id(Path ++ "22", test2, [{use_gproc, true}]),
+	?MODULE:put(server(now_pointer(), test1), <<"ave">>),
+	?MODULE:put(server(now_pointer(), test2), <<"bye">>),
+	?MODULE:put(server(now_pointer(), test1), <<"servus">>),
+	?MODULE:put(server(now_pointer(), test2), <<"ade">>),
+	?assertEqual([<<"hello">>, <<"ave">>, <<"servus">>], gather_all(test1)),
+	?assertEqual([<<"good bye">>, <<"bye">>, <<"ade">>], gather_all(test2)),
+	[destroy(Pid)||{_Data, Pid}<-servers()].
 
 gather_all() ->
-	gather_all(0).
+	gather_all(undefined).
 
-gather_all(Pointer) ->
-	case server(Pointer) of
+gather_all(ID) ->
+	gather_all(0, ID).
+
+gather_all(Pointer, ID) ->
+	case server(Pointer, ID) of
 		not_found ->
 			[];
 		Server ->
@@ -666,7 +711,7 @@ gather_all(Pointer) ->
 				not_found ->
 					[];
 				{PointerNew, Data} ->
-					[Data|gather_all(PointerNew)]
+					[Data|gather_all(PointerNew, ID)]
 			end
 	end.
 

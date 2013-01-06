@@ -48,6 +48,7 @@
 	, covers/2
 	, sync/1
 	, servers/0
+	, server/1
 ]).
 
 -type server_name() :: atom() | pid().
@@ -113,6 +114,20 @@ perf_file_pointer(Exp, Length) ->
 servers() ->
 	All = gproc:select([{{{p, l, appendix_server}, '_', '_'}, [], ['$$']}]),
 	lists:sort(fun(A, B) -> A >= B end, [{Data, Pid}||[_, Pid, Data]<-All]).
+
+% the server that serves the pointers larger than the given one
+server(Pointer) ->
+	case gproc:select(
+		{l,p},
+		[{{{p, l, appendix_server}, '$1', [{pointer_low, '_'}, {pointer_high, '$2'}, '_']},
+		[{'>=',  '$2', Pointer + 1}, {'=/=', '$2', undefined}],
+		['$1']}],
+		1) of
+		'$end_of_table' ->
+			not_found;
+		{[Pid], _} ->
+			Pid
+	end.
 
 %%%===================================================================
 %%% API
@@ -453,7 +468,8 @@ iaf_test_() ->
         , {"test put speed", timeout, 120, fun test_put_speed/0}
         , {"is durable", fun test_durability/0}
         , {"returns correct file slices", fun test_data_slice/0}
-        , {"works with gproc", fun test_grpoc/0}
+        , {"works with gproc", fun test_gproc/0}
+        , {"works with gproc2", fun test_gproc2/0}
         , {"destroys", fun test_destroy/0}
         , {"locks", fun test_locking/0}
         , {"properties", timeout, 1200, fun proper_test/0}
@@ -559,23 +575,29 @@ test_cover() ->
 	?assertEqual(T, Covers(I2)),	
 	?assertEqual(F, Covers(I2+1)).
 
-test_grpoc() ->
+test_gproc() ->
 	Overhaed = ?INDEXSIZE + ?SIZESIZE,
 	application:start(gproc),
 	stop(iaf),
 	Path = ?TESTDB ++ "topic_gproc",
-	?MODULE:start_link(iaf1, Path ++ "1", [{use_gproc, true}]),
+	{ok, Pid1} = ?MODULE:start_link(iaf1, Path ++ "1", [{use_gproc, true}]),
 	[S1] = appendix_server:servers(),
 	Get = fun(K, {Data, _Pid}) -> proplists:get_value(K, Data, not_found) end,
 	?assertEqual(undefined, Get(pointer_low,  S1)),
 	?assertEqual(undefined, Get(pointer_high, S1)),
 	?assertEqual(0, Get(size, 				  S1)),
 	I11 = ?MODULE:put(iaf1, <<"hello">>),
+	?assertEqual(Pid1, server(I11 - 100)),
+	?assertEqual(Pid1, server(I11 - 1)),
+	?assertEqual(not_found, server(I11)),
 	[S2] = appendix_server:servers(),
 	?assertEqual(I11, Get(pointer_low,  S2)),
 	?assertEqual(I11, Get(pointer_high, S2)),
 	?assertEqual(5 + Overhaed, Get(size, 			S2)),
-	?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
+	{ok, Pid2} = ?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
+	?assertEqual(Pid1, server(I11 - 100)),
+	?assertEqual(Pid1, server(I11 - 1)),
+	?assertEqual(not_found, server(I11)),
 	[S13, S23] = appendix_server:servers(),
 	?assertEqual(undefined, Get(pointer_low,  S13)),
 	?assertEqual(undefined, Get(pointer_high, S13)),
@@ -584,6 +606,15 @@ test_grpoc() ->
 	?assertEqual(I11, Get(pointer_high, S23)),
 	?assertEqual(5 + Overhaed, Get(size, 			S23)),
 	I21 = ?MODULE:put(iaf2, <<"what up">>),
+	?assertEqual(Pid1, server(I11 - 100)),
+	?assertEqual(Pid1, server(I11 - 1)),
+	error_logger:error_msg("servers():~p\n", [servers()]),
+	error_logger:error_msg("Pointer:~p\n", [I11]),
+	?assertEqual(Pid2, server(I11)),
+	?assertEqual(not_found, server(I21)),
+	?assertEqual(Pid2, server(I21 - 100)),
+	?assertEqual(Pid2, server(I21 - 1)),
+	?assertEqual(not_found, server(I21)),
 	I22 = ?MODULE:put(iaf2, <<"over there?">>),
 	[S14, S24] = appendix_server:servers(),
 	?assertEqual(I21, Get(pointer_low,  S14)),
@@ -591,7 +622,38 @@ test_grpoc() ->
 	?assertEqual(18 + 2 * Overhaed, Get(size, 				  S14)),
 	?assertEqual(I11, Get(pointer_low,  S24)),
 	?assertEqual(I11, Get(pointer_high, S24)),
-	?assertEqual(5 + Overhaed, Get(size, 			S24)).
+	?assertEqual(5 + Overhaed, Get(size, 			S24)),
+	destroy(iaf1),
+	destroy(iaf2).
+
+test_gproc2() ->
+	application:start(gproc),
+	stop(iaf),
+	Path = ?TESTDB ++ "topic_gproc",
+	?assertEqual([], gather_all()),
+	?MODULE:start_link(iaf1, Path ++ "1", [{use_gproc, true}]),
+	?MODULE:put(iaf1, <<"hello">>),
+	?assertEqual([<<"hello">>], gather_all()),
+	?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
+	?MODULE:put(iaf2, <<"what up">>),
+	?assertEqual([<<"hello">>, <<"what up">>], gather_all()),
+	?MODULE:put(iaf2, <<"over there?">>),
+	?assertEqual([<<"hello">>, <<"what up">>, <<"over there?">>], gather_all()),
+	destroy(iaf1),
+	destroy(iaf2).
+
+
+gather_all() ->
+	gather_all(0).
+
+gather_all(Pointer) ->
+	case server(Pointer) of
+		not_found ->
+			[];
+		Server ->
+			{PointerNew, Data} = ?MODULE:next(Server, Pointer),
+			[Data|gather_all(PointerNew)]
+	end.
 
 test_destroy() ->
 	Next = fun(I) -> ?MODULE:next(iaf, I) end,

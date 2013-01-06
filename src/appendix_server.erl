@@ -124,7 +124,17 @@ server(Pointer) ->
 		['$1']}],
 		1) of
 		'$end_of_table' ->
-			not_found;
+			% there was no server for upstream pointer, so we return the largest 
+			case gproc:select(
+				{l,p},
+				[{{{p, l, appendix_server}, '$1', [{pointer_low, '_'}, {pointer_high, '$2'}, '_']},
+				[],
+				['$1']}]) of
+					[] ->
+						not_found;
+					Pids ->
+						lists:last(Pids)
+			end;	
 		{[Pid], _} ->
 			Pid
 	end.
@@ -580,6 +590,7 @@ test_gproc() ->
 	application:start(gproc),
 	stop(iaf),
 	Path = ?TESTDB ++ "topic_gproc",
+	?assertEqual(not_found, server(0)),
 	{ok, Pid1} = ?MODULE:start_link(iaf1, Path ++ "1", [{use_gproc, true}]),
 	[S1] = appendix_server:servers(),
 	Get = fun(K, {Data, _Pid}) -> proplists:get_value(K, Data, not_found) end,
@@ -589,7 +600,7 @@ test_gproc() ->
 	I11 = ?MODULE:put(iaf1, <<"hello">>),
 	?assertEqual(Pid1, server(I11 - 100)),
 	?assertEqual(Pid1, server(I11 - 1)),
-	?assertEqual(not_found, server(I11)),
+	?assertEqual(Pid1, server(I11)),
 	[S2] = appendix_server:servers(),
 	?assertEqual(I11, Get(pointer_low,  S2)),
 	?assertEqual(I11, Get(pointer_high, S2)),
@@ -597,7 +608,7 @@ test_gproc() ->
 	{ok, Pid2} = ?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
 	?assertEqual(Pid1, server(I11 - 100)),
 	?assertEqual(Pid1, server(I11 - 1)),
-	?assertEqual(not_found, server(I11)),
+	?assertEqual(Pid2, server(I11)),
 	[S13, S23] = appendix_server:servers(),
 	?assertEqual(undefined, Get(pointer_low,  S13)),
 	?assertEqual(undefined, Get(pointer_high, S13)),
@@ -611,10 +622,10 @@ test_gproc() ->
 	error_logger:error_msg("servers():~p\n", [servers()]),
 	error_logger:error_msg("Pointer:~p\n", [I11]),
 	?assertEqual(Pid2, server(I11)),
-	?assertEqual(not_found, server(I21)),
+	?assertEqual(Pid2, server(I21)),
 	?assertEqual(Pid2, server(I21 - 100)),
 	?assertEqual(Pid2, server(I21 - 1)),
-	?assertEqual(not_found, server(I21)),
+	?assertEqual(Pid2, server(I21)),
 	I22 = ?MODULE:put(iaf2, <<"over there?">>),
 	[S14, S24] = appendix_server:servers(),
 	?assertEqual(I21, Get(pointer_low,  S14)),
@@ -651,8 +662,12 @@ gather_all(Pointer) ->
 		not_found ->
 			[];
 		Server ->
-			{PointerNew, Data} = ?MODULE:next(Server, Pointer),
-			[Data|gather_all(PointerNew)]
+			case ?MODULE:next(Server, Pointer) of
+				not_found ->
+					[];
+				{PointerNew, Data} ->
+					[Data|gather_all(PointerNew)]
+			end
 	end.
 
 test_destroy() ->

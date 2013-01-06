@@ -35,4 +35,4 @@ xref: compile
 	rebar xref skip_deps=true
 
 analyze: compile
-	dialyzer ebin/*.beam deps/bisect/ebin/*.beam
+	dialyzer ebin/*.beam deps/*/ebin/*.beam

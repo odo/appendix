@@ -50,7 +50,7 @@
 	, covers/2
 	, sync/1
 	, servers/0
-	, server/1
+	, server/1, server/2
 ]).
 
 -type server_name() :: atom() | pid().

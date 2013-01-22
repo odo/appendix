@@ -434,17 +434,18 @@ now_pointer() ->
 
 encode_data(Pointer, Data) ->
 	PointerEncoded = encode_pointer(Pointer),
-	Size = byte_size(Data),
+	Size = byte_size(Data) + byte_size(PointerEncoded),
 	SizeBin = <<Size:?SIZESIZEBITS>>,
-	<< PointerEncoded/binary, SizeBin/binary, Data/binary >>.
+	<< SizeBin/binary, PointerEncoded/binary, Data/binary >>.
 
 decode_data(<<>>) ->
 	[];
 
 decode_data(Data) ->
-	<< Pointer:?INDEXSIZE/binary, SizeBin:?SIZESIZE/binary, Rest1/binary>> = Data,
+	<< SizeBin:?SIZESIZE/binary, Pointer:?INDEXSIZE/binary, Rest1/binary>> = Data,
 	Size = binary:decode_unsigned(SizeBin),
-	<< Item:Size/binary, Rest2/binary>> = Rest1,
+	DataSize = Size - byte_size(Pointer),
+	<< Item:DataSize/binary, Rest2/binary>> = Rest1,
 	[{decode_pointer(Pointer), Item} | decode_data(Rest2)].
 
 encode_pointer_offset(I, O) ->

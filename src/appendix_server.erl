@@ -49,7 +49,7 @@
 	, data_slice/3
 	, covers/2
 	, sync/1
-	, servers/0
+	, servers/0, servers/1
 	, server/1, server/2
 	, repair/1
 ]).

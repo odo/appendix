@@ -53,6 +53,10 @@
 	, server/1, server/2
 ]).
 
+-ifdef(TEST).
+-export([sync_and_crash/1, state/1]).
+-endif.
+
 -type server_name() :: atom() | pid().
 -type pointer() :: non_neg_integer().
 -type data() :: binary().
@@ -222,7 +226,12 @@ destroy(ServerName) ->
 -ifdef(TEST).
 state(ServerName) ->
     gen_server:call(ServerName, {state}).
+
+sync_and_crash(ServerName) ->
+    gen_server:call(ServerName, {sync_and_crash}).
 -endif.
+
+
 
 %%%===================================================================
 %%% Callbacks
@@ -326,11 +335,17 @@ handle_call({covers, Pointer}, _From, State = #state{pointer_low = PointerLow, p
 	Reply = Pointer >= PointerLow andalso Pointer =< PointerHigh,
 	{reply, Reply, State};
 
-handle_call({state}, _From, State) ->
-	{reply, State, State};
 
 handle_call({sync}, _From, State) ->
 	{reply, ok, sync_internal(State)};
+
+handle_call({state}, _From, State) ->
+	{reply, State, State};
+
+handle_call({sync_and_crash}, _From, State) ->
+	StateNew = sync_internal(State),
+	exit(kaputt),
+	{reply, ok, StateNew};
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.

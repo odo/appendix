@@ -54,9 +54,7 @@
 	, repair/1
 ]).
 
--ifdef(TEST).
 -export([sync_and_crash/1, state/1]).
--endif.
 
 -type server_name() :: atom() | pid().
 -type pointer() :: non_neg_integer().
@@ -123,32 +121,35 @@ servers() ->
 
 servers(ID) ->
 	All = gproc:select([{{gproc_key(ID), '_', '_'}, [], ['$$']}]),
-	lists:sort(fun(A, B) -> A >= B end, [{Data, Pid}||[_, Pid, Data]<-All]).
+	lists:sort(fun(A, B) -> A =< B end, [{Data, Pid}||[_, Pid, Data]<-All]).
 
 % the server that serves the pointers larger than the given one
 server(Pointer) ->
 	server(Pointer, undefined).
 
+server_pointer_eg(_, []) ->
+	not_found;
+server_pointer_eg(Pointer, [{Data, Pid}|Rest]) ->
+	High = proplists:get_value(pointer_high, Data),
+	case High > Pointer andalso High =/= undefined of
+		true ->
+			Pid;
+		false ->
+			server_pointer_eg(Pointer, Rest)
+	end.
+
 server(Pointer, ID) ->
-	case gproc:select(
-		{l,p},
-		[{{gproc_key(ID), '$1', [{pointer_low, '_'}, {pointer_high, '$2'}, '_']},
-		[{'>=',  '$2', Pointer + 1}, {'=/=', '$2', undefined}],
-		['$1']}],
-		1) of
-		'$end_of_table' ->
-			% there was no server for upstream pointers, so we return the largest which is downstream
-			case gproc:select(
-				{l,p},
-				[{{gproc_key(ID), '$1', [{pointer_low, '_'}, {pointer_high, '_'}, '_']},
-				[],
-				['$1']}]) of
-					[] ->
-						not_found;
-					Pids ->
-						lists:last(Pids)
-			end;	
-		{[Pid], _} ->
+	Servers = servers(ID),
+	case server_pointer_eg(Pointer, Servers) of
+		not_found ->
+			case Servers of
+				[] ->
+					not_found;
+				_ -> 
+					{_, Pid} = lists:last(Servers),
+					Pid
+			end;
+		Pid ->
 			Pid
 	end.
 
@@ -231,13 +232,11 @@ stop(ServerName) ->
 destroy(ServerName) ->
     gen_server:cast(ServerName, destroy).
 
--ifdef(TEST).
 state(ServerName) ->
     gen_server:call(ServerName, {state}).
 
 sync_and_crash(ServerName) ->
     gen_server:call(ServerName, {sync_and_crash}).
--endif.
 
 
 
@@ -654,7 +653,7 @@ test_gproc() ->
 	?assertEqual(Pid1, server(I11 - 100)),
 	?assertEqual(Pid1, server(I11 - 1)),
 	?assertEqual(Pid2, server(I11)),
-	[S13, S23] = appendix_server:servers(),
+	[S23, S13] = appendix_server:servers(),
 	?assertEqual(undefined, Get(pointer_low,  S13)),
 	?assertEqual(undefined, Get(pointer_high, S13)),
 	?assertEqual(0, Get(size, 				  S13)),
@@ -672,7 +671,7 @@ test_gproc() ->
 	?assertEqual(Pid2, server(I21 - 1)),
 	?assertEqual(Pid2, server(I21)),
 	I22 = ?MODULE:put(iaf2, <<"over there?">>),
-	[S14, S24] = appendix_server:servers(),
+	[S24, S14] = appendix_server:servers(),
 	?assertEqual(I21, Get(pointer_low,  S14)),
 	?assertEqual(I22, Get(pointer_high, S14)),
 	?assertEqual(18 + 2 * Overhaed, Get(size, 				  S14)),

@@ -514,14 +514,14 @@ maybe_sync(State = #state{write_buffer_size = WriteBufferSize}) ->
 			State
 	end.
 
-sync_internal(State = #state{data_file = DataFile, index_file = IndexFile, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) ->
+sync_internal(State = #state{index = Index, data_file = DataFile, index_file = IndexFile, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) ->
 	case WriteBufferSize of
 		0 ->
 			State;
 		_ ->
 			file:write(DataFile, WriteBuffer),
 			file:write(IndexFile, IndexWriteBuffer),
-			State#state{write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
+			State#state{index = bisect:compact(Index), write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
 	end.
 
 %%%===================================================================

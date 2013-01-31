@@ -378,7 +378,8 @@ handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
 	unlock(PathPrefix),
     {stop, normal, State}.
 
-handle_info(_Info, State) ->
+handle_info(Info, State) ->
+	error_logger:info_msg("received: ~p\n", [Info]),
 	{noreply, State}.
 
 

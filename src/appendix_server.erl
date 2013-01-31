@@ -22,6 +22,7 @@
 	, pointer_high
 	, pointer_low
 	, offset
+	, count
 	, write_buffer
 	, index_write_buffer
 	, write_buffer_size
@@ -278,9 +279,10 @@ init([PathPrefix, ID, Options]) when is_list(PathPrefix)->
 			error_logger:info_msg("loaded index of ~p bytes in ~p ms.\n", [byte_size(IndexData), (T / math:pow(10, 3))]),
 			{IndexNew, PL, PH, Off}
 	end,
+	Count = bisect:num_keys(Index),
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
+	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
 	advertise(StateNew),
 	{ok, StateNew}.
 
@@ -290,10 +292,11 @@ handle_call({info}, _From, State) ->
 		, {pointer_low, State#state.pointer_low}
 		, {pointer_high, State#state.pointer_high}
 		, {size, State#state.offset}
+		, {count, State#state.count}
 	],
 	{reply, Info, State};
 
-handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
+handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, count = Count, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
 	PointerNow = now_pointer(),
 	IndexData = encode_pointer_offset(PointerNow, Offset),
 	IndexNew = bisect:append(Index, IndexData),
@@ -304,7 +307,7 @@ handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, p
 		undefined -> PointerNow;
 		_ -> 		 PointerLow
 	end,
-	StateNew = State#state{index = IndexNew, offset = Offset + byte_size(DataEncoded), pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
+	StateNew = State#state{index = IndexNew, offset = Offset + byte_size(DataEncoded), count = Count + 1, pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
 	advertise(StateNew),
 	StateSync = maybe_sync(StateNew),
 	{reply, PointerNow, StateSync};
@@ -652,12 +655,14 @@ test_info() ->
 	Check = fun(Key, Expected) -> ?assertEqual(Expected, proplists:get_value(Key, info(Server))) end,
 	Overhaed = ?INDEXSIZE + ?SIZESIZE,
 	Check(size, 0),
+	Check(count, 0),
 	Check(id, "the_id"),
 	Check(pointer_low, undefined),
 	Check(pointer_high, undefined),
 	Pointer1 = put(Server, <<"hello">>),
 	Pointer2 = put(Server, <<"you">>),
 	Check(size, 2 * Overhaed + 8),
+	Check(count, 2),
 	Check(id, "the_id"),
 	Check(pointer_low, Pointer1),
 	Check(pointer_high, Pointer2).

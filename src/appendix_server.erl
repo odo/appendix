@@ -37,12 +37,14 @@
 -define(SYNCEVERY, 1000).
 -define(SERVER, ?MODULE).
 
+-compile({no_auto_import,[put/2]}).
 -export([
 	start_link/2, start_link/3
 	, start_link_with_id/2, start_link_with_id/3
 	, start_link_anon/1, start_link_anon/2
 	, stop/1
 	, destroy/1
+	, info/1
 	, put/2
 	, next/2
 	, file_pointer/3
@@ -191,6 +193,10 @@ start_link(ServerName, PathPrefix, Options) when is_atom(ServerName), is_list(Pa
 	lock_or_throw(PathPrefix),
 	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, undefined, Options], []).
 
+-spec info(server_name()) -> list().
+info(ServerName) ->
+	gen_server:call(ServerName, {info}).
+
 -spec put(server_name(), data()) -> pointer().
 put(ServerName, Data) ->
 	gen_server:call(ServerName, {put, Data}).
@@ -277,6 +283,15 @@ init([PathPrefix, ID, Options]) when is_list(PathPrefix)->
 	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
 	advertise(StateNew),
 	{ok, StateNew}.
+
+handle_call({info}, _From, State) ->
+	Info = [
+		{id, State#state.id}
+		, {pointer_low, State#state.pointer_low}
+		, {pointer_high, State#state.pointer_high}
+		, {size, State#state.offset}
+	],
+	{reply, Info, State};
 
 handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
 	PointerNow = now_pointer(),
@@ -521,6 +536,7 @@ iaf_test_() ->
         , {"test put speed", timeout, 120, fun test_put_speed/0}
         , {"is durable", fun test_durability/0}
         , {"returns correct file slices", fun test_data_slice/0}
+        , {"returns correct info", fun test_info/0}
         , {"works with gproc", fun test_gproc/0}
         , {"works with gproc2", fun test_gproc2/0}
         , {"servers can be seperated by name", fun test_server_naming/0}
@@ -628,6 +644,22 @@ test_cover() ->
 	?assertEqual(T, Covers(I1)),	
 	?assertEqual(T, Covers(I2)),	
 	?assertEqual(F, Covers(I2+1)).
+
+test_info() ->
+	Path = ?TESTDB ++ "info_test",
+	{ok, Server} = start_link_with_id(Path, "the_id"),
+	Check = fun(Key, Expected) -> ?assertEqual(Expected, proplists:get_value(Key, info(Server))) end,
+	Overhaed = ?INDEXSIZE + ?SIZESIZE,
+	Check(size, 0),
+	Check(id, "the_id"),
+	Check(pointer_low, undefined),
+	Check(pointer_high, undefined),
+	Pointer1 = put(Server, <<"hello">>),
+	Pointer2 = put(Server, <<"you">>),
+	Check(size, 2 * Overhaed + 8),
+	Check(id, "the_id"),
+	Check(pointer_low, Pointer1),
+	Check(pointer_high, Pointer2).
 
 test_gproc() ->
 	Overhaed = ?INDEXSIZE + ?SIZESIZE,

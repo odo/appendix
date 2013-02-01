@@ -18,7 +18,7 @@
 	, index_file
 	, data_file
 	, data_file_name
-	, index
+	, index_server
 	, pointer_high
 	, pointer_low
 	, offset
@@ -256,33 +256,34 @@ init([PathPrefix, ID, Options]) when is_list(PathPrefix)->
 	UseGproc = proplists:get_value(use_gproc, Options, false),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
 	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName, Options}]),
-	{Index, PointerLow, PointerHigh, Offset} = 
+	{IndexServer, PointerLow, PointerHigh, Offset} = 
 	case file:read_file_info(DataFileName) of
 		{error, enoent} ->
 			error_logger:info_msg("Files don't exist, creating new ones.\n", []),
-			{bisect:new(?INDEXSIZE, ?OFFSETSIZE), undefined, undefined, 0};
+			{ok, IndexServerNew} = bisect_server:start_link(?INDEXSIZE, ?OFFSETSIZE),
+			{IndexServerNew, undefined, undefined, 0};
 		{ok, DataFileInfo} ->
 			error_logger:info_msg("Files exist, loading...\n", []),
 			StartTime = now(),
 			{ok, IndexData} = file:read_file(IndexFileName),
-			IndexNew = bisect:new(?INDEXSIZE, ?OFFSETSIZE, IndexData),
-			PL = case bisect:first(IndexNew) of
-				not_found -> undefined;
-				{P1, _} -> decode_pointer(P1)
+			{ok, IndexServerNew} = bisect_server:start_link_with_data(?INDEXSIZE, ?OFFSETSIZE, IndexData),
+			PL = case bisect_server:first(IndexServerNew) of
+				{ok, not_found} -> undefined;
+				{ok, {P1, _}} -> decode_pointer(P1)
 			end,
-			PH = case bisect:last(IndexNew) of
-				not_found -> undefined;
-				{P2, _} -> decode_pointer(P2)
+			PH = case bisect_server:last(IndexServerNew) of
+				{ok, not_found} -> undefined;
+				{ok, {P2, _}} -> decode_pointer(P2)
 			end,
 			Off = DataFileInfo#file_info.size,
 			T = timer:now_diff(now(), StartTime),
 			error_logger:info_msg("loaded index of ~p bytes in ~p ms.\n", [byte_size(IndexData), (T / math:pow(10, 3))]),
-			{IndexNew, PL, PH, Off}
+			{IndexServerNew, PL, PH, Off}
 	end,
-	Count = bisect:num_keys(Index),
+	{ok, Count} = bisect_server:num_keys(IndexServer),
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index = Index, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
+	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index_server = IndexServer, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
 	advertise(StateNew),
 	{ok, StateNew}.
 
@@ -296,10 +297,10 @@ handle_call({info}, _From, State) ->
 	],
 	{reply, Info, State};
 
-handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, count = Count, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
+handle_call({put, Data}, _From, State = #state{index_server = IndexServer, offset = Offset, count = Count, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
 	PointerNow = now_pointer(),
 	IndexData = encode_pointer_offset(PointerNow, Offset),
-	IndexNew = bisect:append(Index, IndexData),
+	bisect_server:append(IndexServer, IndexData),
 	IndexWriteBufferNew = <<IndexWriteBuffer/binary, IndexData/binary>>,
 	DataEncoded = encode_data(PointerNow, Data),
 	WriteBufferNew = <<WriteBuffer/binary, DataEncoded/binary>>,
@@ -307,17 +308,17 @@ handle_call({put, Data}, _From, State = #state{index = Index, offset = Offset, c
 		undefined -> PointerNow;
 		_ -> 		 PointerLow
 	end,
-	StateNew = State#state{index = IndexNew, offset = Offset + byte_size(DataEncoded), count = Count + 1, pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
+	StateNew = State#state{offset = Offset + byte_size(DataEncoded), count = Count + 1, pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
 	advertise(StateNew),
 	StateSync = maybe_sync(StateNew),
 	{reply, PointerNow, StateSync};
 
-handle_call({next, PointerMin}, _From, State = #state{index = Index, offset = Offset, data_file = DataFile}) when is_integer(PointerMin)->
+handle_call({next, PointerMin}, _From, State = #state{index_server = IndexServer, offset = Offset, data_file = DataFile}) when is_integer(PointerMin)->
 	{Reply, StateNew} =
-	case next_internal(PointerMin, Index) of
+	case next_internal(PointerMin, IndexServer) of
 		{PointerNew, DataOffset} ->
 			Length =
-			case next_internal(PointerNew, Index) of
+			case next_internal(PointerNew, IndexServer) of
 				{_, DataOffsetNext} ->
 					DataOffsetNext - DataOffset;
 				not_found ->
@@ -340,14 +341,14 @@ handle_call({next, PointerMin}, _From, State = #state{index = Index, offset = Of
 	end,
 	{reply, Reply, StateNew};
 
-handle_call({file_pointer, Pointer, Limit}, _From, State = #state{index = Index, offset = Offset, data_file_name = DataFileName}) when is_integer(Pointer) andalso is_integer(Limit) ->
+handle_call({file_pointer, Pointer, Limit}, _From, State = #state{index_server = IndexServer, offset = Offset, data_file_name = DataFileName}) when is_integer(Pointer) andalso is_integer(Limit) ->
 	Reply =
-	case next_internal(Pointer, Index) of
+	case next_internal(Pointer, IndexServer) of
 		{_, OffsetStart} ->
-			case bisect:next_nth(Index, encode_pointer(Pointer), Limit + 1) of
-				{_, OffsetEnd} ->
+			case bisect_server:next_nth(IndexServer, encode_pointer(Pointer), Limit + 1) of
+				{ok, {_, OffsetEnd}} ->
 					{DataFileName, OffsetStart, decode_offset(OffsetEnd) - OffsetStart};
-				not_found -> 
+				{ok, not_found} -> 
 					{DataFileName, OffsetStart, Offset - OffsetStart}
 			end;
 		not_found ->
@@ -461,11 +462,11 @@ unlock(PathPrefix) ->
 	error_logger:info_msg("unlocking ~p\n", [PathPrefix]),
 	file:delete(lock_file_name(PathPrefix)).
 
-next_internal(PointerMin, Index) ->
-	case bisect:next(Index, encode_pointer(PointerMin)) of
-		{PointerNew, OffesetNew} ->
+next_internal(PointerMin, IndexServer) ->
+	case bisect_server:next(IndexServer, encode_pointer(PointerMin)) of
+		{ok, {PointerNew, OffesetNew}} ->
 			{decode_pointer(PointerNew), decode_offset(OffesetNew)};
-		not_found ->
+		{ok, not_found} ->
 			not_found
 	end.
 
@@ -514,14 +515,14 @@ maybe_sync(State = #state{write_buffer_size = WriteBufferSize}) ->
 			State
 	end.
 
-sync_internal(State = #state{index = Index, data_file = DataFile, index_file = IndexFile, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) ->
+sync_internal(State = #state{data_file = DataFile, index_file = IndexFile, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) ->
 	case WriteBufferSize of
 		0 ->
 			State;
 		_ ->
 			file:write(DataFile, WriteBuffer),
 			file:write(IndexFile, IndexWriteBuffer),
-			State#state{index = bisect:compact(Index), write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
+			State#state{write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
 	end.
 
 %%%===================================================================
@@ -630,7 +631,7 @@ states_match(S1, S2) ->
 	?assertEqual(S1#state.write_buffer, S2#state.write_buffer),
 	?assertEqual(S1#state.index_write_buffer, S2#state.index_write_buffer),
 	?assertEqual(S1#state.write_buffer_size, S2#state.write_buffer_size),
-	?assertEqual(S1#state.index, S2#state.index).
+	?assertEqual(bisect_server:num_keys(S1#state.index_server), bisect_server:num_keys(S2#state.index_server)).
 
 test_cover() ->
 	F = false,

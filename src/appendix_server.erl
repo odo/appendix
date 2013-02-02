@@ -49,6 +49,7 @@
 	, put/2
 	, next/2
 	, file_pointer/3
+	, decode_data/1
 	, data_slice/3
 	, covers/2
 	, sync/1

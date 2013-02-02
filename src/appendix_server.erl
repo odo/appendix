@@ -27,6 +27,7 @@
 	, index_write_buffer
 	, write_buffer_size
 	, use_gproc
+	, timeout
 }).
 
 -define(INDEXSIZE, 7).
@@ -41,7 +42,7 @@
 -compile({no_auto_import,[put/2]}).
 -export([
 	start_link/2, start_link/3
-	, start_link_with_id/2, start_link_with_id/3
+	, start_link_with_id/2, start_link_with_id/3, start_link_with_id/4
 	, start_link_anon/1, start_link_anon/2
 	, stop/1
 	, destroy/1
@@ -66,7 +67,7 @@
 -type file_name() :: binary().
 -type offset() :: non_neg_integer().
 -type length() :: non_neg_integer().
-
+-type timeout_value() :: non_neg_integer() | undefined.
 % callbacks
 -export ([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -173,8 +174,12 @@ start_link_with_id(PathPrefix, ID) when is_list(PathPrefix)->
 
 -spec start_link_with_id(list(), term(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link_with_id(PathPrefix, ID, Options) when is_list(PathPrefix), is_list(Options) ->
+	start_link_with_id(PathPrefix, ID, infinity, Options).
+
+-spec start_link_with_id(list(), term(), timeout_value(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link_with_id(PathPrefix, ID, Timeout, Options) when is_list(PathPrefix), is_list(Options) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link(?MODULE, [PathPrefix, ID, Options], []).
+	gen_server:start_link(?MODULE, [PathPrefix, ID, Timeout, Options], []).
 
 -spec start_link_anon(list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link_anon(PathPrefix) when is_list(PathPrefix)->
@@ -183,7 +188,7 @@ start_link_anon(PathPrefix) when is_list(PathPrefix)->
 -spec start_link_anon(list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link_anon(PathPrefix, Options) when is_list(PathPrefix), is_list(Options) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link(?MODULE, [PathPrefix, undefined, Options], []).
+	gen_server:start_link(?MODULE, [PathPrefix, undefined, infinity, Options], []).
 
 -spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, PathPrefix) when is_atom(ServerName), is_list(PathPrefix)->
@@ -192,7 +197,7 @@ start_link(ServerName, PathPrefix) when is_atom(ServerName), is_list(PathPrefix)
 -spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, PathPrefix, Options) when is_atom(ServerName), is_list(PathPrefix), is_list(Options) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, undefined, Options], []).
+	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, undefined, infinity, Options], []).
 
 -spec info(server_name()) -> list().
 info(ServerName) ->
@@ -251,7 +256,7 @@ sync_and_crash(ServerName) ->
 %%% Callbacks
 %%%===================================================================
 
-init([PathPrefix, ID, Options]) when is_list(PathPrefix)->
+init([PathPrefix, ID, Timeout, Options]) when is_list(PathPrefix)->
 	process_flag(trap_exit, proplists:get_value(trap_exit, Options, false)),
 	UseGproc = proplists:get_value(use_gproc, Options, false),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
@@ -283,7 +288,7 @@ init([PathPrefix, ID, Options]) when is_list(PathPrefix)->
 	{ok, Count} = bisect_server:num_keys(IndexServer),
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index_server = IndexServer, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc},
+	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index_server = IndexServer, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc, timeout = Timeout},
 	advertise(StateNew),
 	{ok, StateNew}.
 
@@ -295,12 +300,13 @@ handle_call({info}, _From, State) ->
 		, {size, State#state.offset}
 		, {count, State#state.count}
 	],
-	{reply, Info, State};
+	{reply, Info, State, State#state.timeout};
 
-handle_call({put, Data}, _From, State = #state{index_server = IndexServer, offset = Offset, count = Count, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
+handle_call({put, Data}, _From, State = #state{offset = Offset, count = Count, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
+	StateAwake = wake(State),
 	PointerNow = now_pointer(),
 	IndexData = encode_pointer_offset(PointerNow, Offset),
-	bisect_server:append(IndexServer, IndexData),
+	bisect_server:append(StateAwake#state.index_server, IndexData),
 	IndexWriteBufferNew = <<IndexWriteBuffer/binary, IndexData/binary>>,
 	DataEncoded = encode_data(PointerNow, Data),
 	WriteBufferNew = <<WriteBuffer/binary, DataEncoded/binary>>,
@@ -308,44 +314,46 @@ handle_call({put, Data}, _From, State = #state{index_server = IndexServer, offse
 		undefined -> PointerNow;
 		_ -> 		 PointerLow
 	end,
-	StateNew = State#state{offset = Offset + byte_size(DataEncoded), count = Count + 1, pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
+	StateNew = StateAwake#state{offset = Offset + byte_size(DataEncoded), count = Count + 1, pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
 	advertise(StateNew),
 	StateSync = maybe_sync(StateNew),
-	{reply, PointerNow, StateSync};
+	{reply, PointerNow, StateSync, State#state.timeout};
 
-handle_call({next, PointerMin}, _From, State = #state{index_server = IndexServer, offset = Offset, data_file = DataFile}) when is_integer(PointerMin)->
+handle_call({next, PointerMin}, _From, State = #state{offset = Offset}) when is_integer(PointerMin)->
+	StateAwake = wake(State),
 	{Reply, StateNew} =
-	case next_internal(PointerMin, IndexServer) of
+	case next_internal(PointerMin, StateAwake#state.index_server) of
 		{PointerNew, DataOffset} ->
 			Length =
-			case next_internal(PointerNew, IndexServer) of
+			case next_internal(PointerNew, StateAwake#state.index_server) of
 				{_, DataOffsetNext} ->
 					DataOffsetNext - DataOffset;
 				not_found ->
 					Offset - DataOffset
 			end,
-			case file:pread(DataFile, DataOffset, Length) of
+			case file:pread(StateAwake#state.data_file, DataOffset, Length) of
 				{ok, DataRaw} ->
 					[{PointerNew, Data}] = decode_data(DataRaw),
-					{{PointerNew, Data}, State};
+					{{PointerNew, Data}, StateAwake};
 				eof ->
 					% the in-memory index might point to data which is not
 					% syced to disk yet. we give it a try
-					StateSynced = sync_internal(State),
-					{ok, DataRaw} = file:pread(DataFile, DataOffset, Length),
+					StateSynced = sync_internal(StateAwake),
+					{ok, DataRaw} = file:pread(StateAwake#state.data_file, DataOffset, Length),
 					[{PointerNew, Data}] = decode_data(DataRaw),
 					{{PointerNew, Data}, StateSynced}
 			end;
 		not_found ->
-			{not_found, State}
+			{not_found, StateAwake}
 	end,
-	{reply, Reply, StateNew};
+	{reply, Reply, StateNew, StateNew#state.timeout};
 
-handle_call({file_pointer, Pointer, Limit}, _From, State = #state{index_server = IndexServer, offset = Offset, data_file_name = DataFileName}) when is_integer(Pointer) andalso is_integer(Limit) ->
+handle_call({file_pointer, Pointer, Limit}, _From, State = #state{offset = Offset, data_file_name = DataFileName}) when is_integer(Pointer) andalso is_integer(Limit) ->
+	StateAwake = wake(State),
 	Reply =
-	case next_internal(Pointer, IndexServer) of
+	case next_internal(Pointer, StateAwake#state.index_server) of
 		{_, OffsetStart} ->
-			case bisect_server:next_nth(IndexServer, encode_pointer(Pointer), Limit + 1) of
+			case bisect_server:next_nth(StateAwake#state.index_server, encode_pointer(Pointer), Limit + 1) of
 				{ok, {_, OffsetEnd}} ->
 					{DataFileName, OffsetStart, decode_offset(OffsetEnd) - OffsetStart};
 				{ok, not_found} -> 
@@ -354,27 +362,30 @@ handle_call({file_pointer, Pointer, Limit}, _From, State = #state{index_server =
 		not_found ->
 			not_found
 	end,
-	StateNew = sync_internal(State),
-	{reply, Reply, StateNew};
+	StateNew = sync_internal(StateAwake),
+	{reply, Reply, StateNew, StateNew#state.timeout};
 
 handle_call({covers, Pointer}, _From, State = #state{pointer_low = PointerLow, pointer_high = PointerHigh}) when is_integer(Pointer) ->
 	Reply = Pointer >= PointerLow andalso Pointer =< PointerHigh,
-	{reply, Reply, State};
+	{reply, Reply, State, State#state.timeout};
 
 
 handle_call({sync}, _From, State) ->
-	{reply, ok, sync_internal(State)};
+	StateAwake = wake(State),
+	{reply, ok, sync_internal(StateAwake), State#state.timeout};
 
 handle_call({state}, _From, State) ->
-	{reply, State, State};
+	StateAwake = wake(State),
+	{reply, StateAwake, StateAwake, State#state.timeout};
 
 handle_call({sync_and_crash}, _From, State) ->
-	StateNew = sync_internal(State),
+	StateAwake = wake(State),
+	StateNew = sync_internal(StateAwake),
 	exit(kaputt),
-	{reply, ok, StateNew};
+	{reply, ok, StateNew, State#state.timeout};
 
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, State}.
+    {stop, normal, ok, wake(State)}.
 
 handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
 	file:delete(data_file_name(PathPrefix)),
@@ -382,10 +393,27 @@ handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
 	unlock(PathPrefix),
     {stop, normal, State}.
 
-handle_info(Info, State) ->
-	error_logger:info_msg("received: ~p\n", [Info]),
-	{noreply, State}.
+handle_info(timeout, State) ->
+	StateAwake = wake(State),
+	bisect_server:stop(StateAwake#state.index_server),
+	error_logger:error_msg("syncing and sleeping.\n", []),
+	StateSynced = sync_internal(StateAwake),
+	{noreply, StateSynced, infinity};
 
+handle_info({'EXIT', Pid, normal}, State) when Pid =:= State#state.index_server ->
+	% the index server died
+	% this probably means that we told it to do so
+	% because we want to go into hibernation.
+	error_logger:error_msg("index server ~p died ... hibernating ...\n", [State#state.index_server]),
+	% we are dropping the server and the file handlers
+	% as a courtesy to the operating system.
+	file:close(State#state.index_file),
+	file:close(State#state.data_file),
+	{noreply, State#state{index_server = undefined, index_file = undefined, data_file = undefined}, hibernate};
+
+handle_info(Info, State) ->
+	error_logger:error_msg("received: ~p\n", [Info]),
+	{noreply, State, State#state.timeout}.
 
 terminate(shutdown, State) ->
 	cleanup(State),
@@ -432,6 +460,21 @@ gproc_key(ID) ->
 %%%===================================================================
 %%% Utilities
 %%%===================================================================
+
+wake(State = #state{file_path_prefix = PathPrefix}) when State#state.index_server =:= undefined ->
+	error_logger:info_msg("waking from hibernation: ~p.\n", [PathPrefix]),
+	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
+	StartTime = now(),
+	{ok, IndexData} = file:read_file(IndexFileName),
+	{ok, IndexServer} = bisect_server:start_link_with_data(?INDEXSIZE, ?OFFSETSIZE, IndexData),
+	T = timer:now_diff(now(), StartTime),
+	error_logger:info_msg("loaded index of ~p bytes in ~p ms.\n", [byte_size(IndexData), (T / math:pow(10, 3))]),
+	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
+	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
+	State#state{index_server = IndexServer, index_file = IndexFile, data_file = DataFile};
+
+wake(State) ->
+	State.
 
 cleanup(State = #state{file_path_prefix = PathPrefix}) ->
 	StateNew = sync_internal(State),

@@ -1,0 +1,20 @@
+appendix_server:start_link(as, "/tmp/appendix/test").
+appendix_server:put(as, <<"hello">>).
+{P, _} = appendix_server:next(as, 0).
+appendix_server:next(as, P).
+appendix_server:put(as, <<"world">>).
+AccFun = fun(_, {Pointer, Acc}) ->
+{PointerNew, Data} = appendix_server:next(as, Pointer),
+{PointerNew, [Data| Acc]}
+end.
+lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).
+appendix_server:stop(as).
+appendix_server:start_link(as, "/tmp/appendix/test").
+lists:foldl(AccFun, {0, []}, lists:seq(1, 2)).
+[appendix_server:put(as, E)||E<-[<<"you">>,<<"are">>,<<"so">>,<<"wonderful">>,<<"!">>]].
+{FileName, Position, Length} = appendix_server:file_pointer(as, 0, 3).
+{ok, File} = file:open(FileName, [raw, binary]).
+{ok, Data} = file:pread(File, Position, Length).
+appendix_server:decode_data(Data).
+file:close(File).
+appendix_server:data_slice(as, 0, 3).

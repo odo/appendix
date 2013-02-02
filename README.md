@@ -104,7 +104,7 @@ ok
 ok
 ```
 
-Actally this is exactly what data_slice/3 does:
+Actually this is exactly what data_slice/3 does:
 ```erlang
 17> appendix_server:data_slice(as, 0, 3).
 [{1359825679286167,<<"hello">>},

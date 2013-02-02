@@ -26,7 +26,6 @@
 	, write_buffer
 	, index_write_buffer
 	, write_buffer_size
-	, use_gproc
 	, timeout
 }).
 
@@ -41,9 +40,9 @@
 
 -compile({no_auto_import,[put/2]}).
 -export([
-	start_link/2, start_link/3
-	, start_link_with_id/2, start_link_with_id/3, start_link_with_id/4
-	, start_link_anon/1, start_link_anon/2
+	start_link/2
+	, start_link_with_id/2, start_link_with_id/3
+	, start_link_anon/1
 	, stop/1
 	, destroy/1
 	, info/1
@@ -53,8 +52,6 @@
 	, data_slice/3
 	, covers/2
 	, sync/1
-	, servers/0, servers/1
-	, server/1, server/2
 	, repair/1
 ]).
 
@@ -71,49 +68,8 @@
 % callbacks
 -export ([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
+% api
 -export([perf/1, perf_read/1, perf_file_pointer/2, trace/3]).
-
-
-%%%===================================================================
-%%% Finding processes
-%%%===================================================================
-
-servers() ->
-	servers(undefined).
-
-servers(ID) ->
-	All = gproc:select([{{gproc_key(ID), '_', '_'}, [], ['$$']}]),
-	lists:sort(fun(A, B) -> A =< B end, [{Data, Pid}||[_, Pid, Data]<-All]).
-
-% the server that serves the pointers larger than the given one
-server(Pointer) ->
-	server(Pointer, undefined).
-
-server_pointer_eg(_, []) ->
-	not_found;
-server_pointer_eg(Pointer, [{Data, Pid}|Rest]) ->
-	High = proplists:get_value(pointer_high, Data),
-	case High > Pointer andalso High =/= undefined of
-		true ->
-			Pid;
-		false ->
-			server_pointer_eg(Pointer, Rest)
-	end.
-
-server(Pointer, ID) ->
-	Servers = servers(ID),
-	case server_pointer_eg(Pointer, Servers) of
-		not_found ->
-			case Servers of
-				[] ->
-					not_found;
-				_ -> 
-					{_, Pid} = lists:last(Servers),
-					Pid
-			end;
-		Pid ->
-			Pid
-	end.
 
 %%%===================================================================
 %%% API
@@ -121,34 +77,22 @@ server(Pointer, ID) ->
 
 -spec start_link_with_id(list(), term()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link_with_id(PathPrefix, ID) when is_list(PathPrefix)->
-	start_link_with_id(PathPrefix, ID, []).
+	start_link_with_id(PathPrefix, ID, infinity).
 
--spec start_link_with_id(list(), term(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link_with_id(PathPrefix, ID, Options) when is_list(PathPrefix), is_list(Options) ->
-	start_link_with_id(PathPrefix, ID, infinity, Options).
-
--spec start_link_with_id(list(), term(), timeout_value(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link_with_id(PathPrefix, ID, Timeout, Options) when is_list(PathPrefix), is_list(Options) ->
+-spec start_link_with_id(list(), term(), timeout_value()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link_with_id(PathPrefix, ID, Timeout) when is_list(PathPrefix) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link(?MODULE, [PathPrefix, ID, Timeout, Options], []).
+	gen_server:start_link(?MODULE, [PathPrefix, ID, Timeout], []).
 
 -spec start_link_anon(list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link_anon(PathPrefix) when is_list(PathPrefix)->
-	start_link_anon(PathPrefix, []).
-
--spec start_link_anon(list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link_anon(PathPrefix, Options) when is_list(PathPrefix), is_list(Options) ->
+start_link_anon(PathPrefix) when is_list(PathPrefix) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link(?MODULE, [PathPrefix, undefined, infinity, Options], []).
+	gen_server:start_link(?MODULE, [PathPrefix, undefined, infinity], []).
 
 -spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
 start_link(ServerName, PathPrefix) when is_atom(ServerName), is_list(PathPrefix)->
-	start_link(ServerName, PathPrefix, []).
-
--spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link(ServerName, PathPrefix, Options) when is_atom(ServerName), is_list(PathPrefix), is_list(Options) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, undefined, infinity, Options], []).
+	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, undefined, infinity], []).
 
 -spec info(server_name()) -> list().
 info(ServerName) ->
@@ -207,11 +151,10 @@ sync_and_crash(ServerName) ->
 %%% Callbacks
 %%%===================================================================
 
-init([PathPrefix, ID, Timeout, Options]) when is_list(PathPrefix)->
+init([PathPrefix, ID, Timeout]) when is_list(PathPrefix)->
 	process_flag(trap_exit, true),
-	UseGproc = proplists:get_value(use_gproc, Options, false),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
-	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName, Options}]),
+	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName}]),
 	{IndexServer, PointerLow, PointerHigh, Offset} = 
 	case file:read_file_info(DataFileName) of
 		{error, enoent} ->
@@ -239,8 +182,7 @@ init([PathPrefix, ID, Timeout, Options]) when is_list(PathPrefix)->
 	{ok, Count} = bisect_server:num_keys(IndexServer),
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index_server = IndexServer, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, use_gproc = UseGproc, timeout = Timeout},
-	advertise(StateNew),
+	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index_server = IndexServer, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, timeout = Timeout},
 	{ok, StateNew}.
 
 handle_call({info}, _From, State) ->
@@ -266,7 +208,6 @@ handle_call({put, Data}, _From, State = #state{offset = Offset, count = Count, p
 		_ -> 		 PointerLow
 	end,
 	StateNew = StateAwake#state{offset = Offset + byte_size(DataEncoded), count = Count + 1, pointer_low = PointerLowNew, pointer_high = PointerNow, write_buffer = WriteBufferNew, index_write_buffer = IndexWriteBufferNew, write_buffer_size = WriteBufferSize + 1},
-	advertise(StateNew),
 	StateSync = maybe_sync(StateNew),
 	{reply, PointerNow, StateSync, State#state.timeout};
 
@@ -379,34 +320,6 @@ terminate(_, _) ->
 
 code_change(_OldVsn, State, _Extra) ->
 	{ok, State}.
-
-%%%===================================================================
-%%% groc related
-%%%===================================================================
-
-advertise(State) ->
-	case State#state.use_gproc of
-		true ->
-			gproc_set(
-				gproc_key(State#state.id), [
-					{pointer_low, State#state.pointer_low}
-					, {pointer_high, State#state.pointer_high}
-					, {size, State#state.offset}
-			]);
-		false ->
-			noop
-	end.
-
-gproc_set(K, V) ->
-	try
-		gproc:set_value(K, V)
-	catch
-		error:badarg ->
-			gproc:reg(K, V)
-	end.
-
-gproc_key(ID) ->
-	{p, l, {appendix_server, ID}}.
 
 %%%===================================================================
 %%% Utilities
@@ -584,9 +497,6 @@ iaf_test_() ->
         , {"is durable", fun test_durability/0}
         , {"returns correct file slices", fun test_data_slice/0}
         , {"returns correct info", fun test_info/0}
-        , {"works with gproc", fun test_gproc/0}
-        , {"works with gproc2", fun test_gproc2/0}
-        , {"servers can be seperated by name", fun test_server_naming/0}
         , {"destroys", fun test_destroy/0}
         , {"locks", fun test_locking/0}
         , {"properties", timeout, 1200, fun proper_test/0}
@@ -709,115 +619,6 @@ test_info() ->
 	Check(id, "the_id"),
 	Check(pointer_low, Pointer1),
 	Check(pointer_high, Pointer2).
-
-test_gproc() ->
-	Overhaed = ?INDEXSIZE + ?SIZESIZE,
-	application:start(gproc),
-	stop(iaf),
-	Path = ?TESTDB ++ "topic_gproc",
-	?assertEqual(not_found, server(0)),
-	{ok, Pid1} = ?MODULE:start_link(iaf1, Path ++ "1", [{use_gproc, true}]),
-	[S1] = appendix_server:servers(),
-	Get = fun(K, {Data, _Pid}) -> proplists:get_value(K, Data, not_found) end,
-	?assertEqual(undefined, Get(pointer_low,  S1)),
-	?assertEqual(undefined, Get(pointer_high, S1)),
-	?assertEqual(0, Get(size, 				  S1)),
-	I11 = ?MODULE:put(iaf1, <<"hello">>),
-	?assertEqual(Pid1, server(I11 - 100)),
-	?assertEqual(Pid1, server(I11 - 1)),
-	?assertEqual(Pid1, server(I11)),
-	[S2] = appendix_server:servers(),
-	?assertEqual(I11, Get(pointer_low,  S2)),
-	?assertEqual(I11, Get(pointer_high, S2)),
-	?assertEqual(5 + Overhaed, Get(size, 			S2)),
-	{ok, Pid2} = ?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
-	?assertEqual(Pid1, server(I11 - 100)),
-	?assertEqual(Pid1, server(I11 - 1)),
-	?assertEqual(Pid2, server(I11)),
-	[S23, S13] = appendix_server:servers(),
-	?assertEqual(undefined, Get(pointer_low,  S13)),
-	?assertEqual(undefined, Get(pointer_high, S13)),
-	?assertEqual(0, Get(size, 				  S13)),
-	?assertEqual(I11, Get(pointer_low,  S23)),
-	?assertEqual(I11, Get(pointer_high, S23)),
-	?assertEqual(5 + Overhaed, Get(size, 			S23)),
-	I21 = ?MODULE:put(iaf2, <<"what up">>),
-	?assertEqual(Pid1, server(I11 - 100)),
-	?assertEqual(Pid1, server(I11 - 1)),
-	error_logger:error_msg("servers():~p\n", [servers()]),
-	error_logger:error_msg("Pointer:~p\n", [I11]),
-	?assertEqual(Pid2, server(I11)),
-	?assertEqual(Pid2, server(I21)),
-	?assertEqual(Pid2, server(I21 - 100)),
-	?assertEqual(Pid2, server(I21 - 1)),
-	?assertEqual(Pid2, server(I21)),
-	I22 = ?MODULE:put(iaf2, <<"over there?">>),
-	[S24, S14] = appendix_server:servers(),
-	?assertEqual(I21, Get(pointer_low,  S14)),
-	?assertEqual(I22, Get(pointer_high, S14)),
-	?assertEqual(18 + 2 * Overhaed, Get(size, 				  S14)),
-	?assertEqual(I11, Get(pointer_low,  S24)),
-	?assertEqual(I11, Get(pointer_high, S24)),
-	?assertEqual(5 + Overhaed, Get(size, 			S24)),
-	destroy(iaf1),
-	destroy(iaf2).
-
-test_gproc2() ->
-	application:start(gproc),
-	stop(iaf),
-	Path = ?TESTDB ++ "topic_gproc",
-	?assertEqual([], gather_all()),
-	?MODULE:start_link(iaf1, Path ++ "1", [{use_gproc, true}]),
-	?MODULE:put(iaf1, <<"hello">>),
-	?assertEqual([<<"hello">>], gather_all()),
-	?MODULE:start_link(iaf2, Path ++ "2", [{use_gproc, true}]),
-	?MODULE:put(iaf2, <<"what up">>),
-	?assertEqual([<<"hello">>, <<"what up">>], gather_all()),
-	?MODULE:put(iaf2, <<"over there?">>),
-	?assertEqual([<<"hello">>, <<"what up">>, <<"over there?">>], gather_all()),
-	destroy(iaf1),
-	destroy(iaf2).
-
-test_server_naming() ->
-	application:start(gproc),
-	stop(iaf),
-	Path = ?TESTDB ++ "topic_naming_test",
-	?assertEqual([], gather_all(test1)),
-	?assertEqual([], gather_all(test2)),
-	?MODULE:start_link_with_id(Path ++ "1", test1, [{use_gproc, true}]),
-	?MODULE:start_link_with_id(Path ++ "21", test2, [{use_gproc, true}]),
-	?MODULE:put(server(now_pointer(), test1), <<"hello">>),
-	?MODULE:put(server(now_pointer(), test2), <<"good bye">>),
-	?assertEqual([<<"hello">>], gather_all(test1)),
-	?assertEqual([<<"good bye">>], gather_all(test2)),
-	?MODULE:start_link_with_id(Path ++ "2", test1, [{use_gproc, true}]),
-	?MODULE:start_link_with_id(Path ++ "22", test2, [{use_gproc, true}]),
-	?MODULE:put(server(now_pointer(), test1), <<"ave">>),
-	?MODULE:put(server(now_pointer(), test2), <<"bye">>),
-	?MODULE:put(server(now_pointer(), test1), <<"servus">>),
-	?MODULE:put(server(now_pointer(), test2), <<"ade">>),
-	?assertEqual([<<"hello">>, <<"ave">>, <<"servus">>], gather_all(test1)),
-	?assertEqual([<<"good bye">>, <<"bye">>, <<"ade">>], gather_all(test2)),
-	[destroy(Pid)||{_Data, Pid}<-servers()].
-
-gather_all() ->
-	gather_all(undefined).
-
-gather_all(ID) ->
-	gather_all(0, ID).
-
-gather_all(Pointer, ID) ->
-	case server(Pointer, ID) of
-		not_found ->
-			[];
-		Server ->
-			case ?MODULE:next(Server, Pointer) of
-				not_found ->
-					[];
-				{PointerNew, Data} ->
-					[Data|gather_all(PointerNew, ID)]
-			end
-	end.
 
 test_destroy() ->
 	Next = fun(I) -> ?MODULE:next(iaf, I) end,

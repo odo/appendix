@@ -208,7 +208,7 @@ sync_and_crash(ServerName) ->
 %%%===================================================================
 
 init([PathPrefix, ID, Timeout, Options]) when is_list(PathPrefix)->
-	process_flag(trap_exit, proplists:get_value(trap_exit, Options, false)),
+	process_flag(trap_exit, true),
 	UseGproc = proplists:get_value(use_gproc, Options, false),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
 	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName, Options}]),

@@ -73,48 +73,6 @@
 
 -export([perf/1, perf_read/1, perf_file_pointer/2, trace/3]).
 
-trace(M, F, A) ->
-	fprof:trace([start, {procs, [whereis(iaf)]},{file, "/tmp/profile"}]),
-	apply(M, F, A),
-	fprof:profile({file, "/tmp/appendix_profile"}),
-	fprof:analyse().
-
-perf(Exp) ->
-	N = round(math:pow(10, Exp)),
-	Data = <<"See if we can put some data in here so it will be even remotely realistic.">>,
-	Put = fun() -> ?MODULE:put(iaf, Data), n end,
-	StartTime = now(),
-	do_times(Put, N),
-	?MODULE:sync(iaf),
-	T = timer:now_diff(now(), StartTime),
-	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with ~p total.\n", [byte_size(Data), (N / (T / math:pow(10, 6))), N]).
-
-do_times(_, 0) ->
-	noop;
-
-do_times(Fun, N) ->
-	Fun(),
-	do_times(Fun, N - 1).
-
-perf_read(Exp) ->
-	perf(Exp),
-	N = round(1 * math:pow(10, Exp)),
-	Seq = lists:seq(1, N),
-	StartTime = now(),
-	lists:foldl(fun(_, I) -> {I2, _} = ?MODULE:next(iaf, I), I2 end, 0, Seq),
-	T = timer:now_diff(now(), StartTime),
-	error_logger:info_msg("read performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
-
-perf_file_pointer(Exp, Length) ->
-	perf(Exp),
-	N = round(math:pow(10, Exp) / Length - 0.5),
-	Seq = lists:seq(1, N),
-	StartTime = now(),
-	lists:foldl(fun(_, I) -> {I2, _, _, _} = ?MODULE:file_pointer(iaf, I, Length), I2 end, 0, Seq),
-	T = timer:now_diff(now(), StartTime),
-	error_logger:info_msg("file_pointer performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
-
-
 
 %%%===================================================================
 %%% Finding processes
@@ -156,13 +114,6 @@ server(Pointer, ID) ->
 		Pid ->
 			Pid
 	end.
-
-%%%===================================================================
-%%% Utilities
-%%%===================================================================
-
-repair(Path) ->
-	unlock(Path).
 
 %%%===================================================================
 %%% API
@@ -461,6 +412,9 @@ gproc_key(ID) ->
 %%% Utilities
 %%%===================================================================
 
+repair(Path) ->
+	unlock(Path).
+
 wake(State = #state{file_path_prefix = PathPrefix}) when State#state.index_server =:= undefined ->
 	error_logger:info_msg("waking from hibernation: ~p.\n", [PathPrefix]),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
@@ -567,6 +521,51 @@ sync_internal(State = #state{data_file = DataFile, index_file = IndexFile, write
 			file:write(IndexFile, IndexWriteBuffer),
 			State#state{write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
 	end.
+
+%%%===================================================================
+%%% Tracing and performance
+%%%===================================================================
+
+trace(M, F, A) ->
+	fprof:trace([start, {procs, [whereis(iaf)]},{file, "/tmp/profile"}]),
+	apply(M, F, A),
+	fprof:profile({file, "/tmp/appendix_profile"}),
+	fprof:analyse().
+
+perf(Exp) ->
+	N = round(math:pow(10, Exp)),
+	Data = <<"See if we can put some data in here so it will be even remotely realistic.">>,
+	Put = fun() -> ?MODULE:put(iaf, Data), n end,
+	StartTime = now(),
+	do_times(Put, N),
+	?MODULE:sync(iaf),
+	T = timer:now_diff(now(), StartTime),
+	error_logger:info_msg("put performance with ~p bytes per put: ~p Ops/s with ~p total.\n", [byte_size(Data), (N / (T / math:pow(10, 6))), N]).
+
+do_times(_, 0) ->
+	noop;
+
+do_times(Fun, N) ->
+	Fun(),
+	do_times(Fun, N - 1).
+
+perf_read(Exp) ->
+	perf(Exp),
+	N = round(1 * math:pow(10, Exp)),
+	Seq = lists:seq(1, N),
+	StartTime = now(),
+	lists:foldl(fun(_, I) -> {I2, _} = ?MODULE:next(iaf, I), I2 end, 0, Seq),
+	T = timer:now_diff(now(), StartTime),
+	error_logger:info_msg("read performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
+
+perf_file_pointer(Exp, Length) ->
+	perf(Exp),
+	N = round(math:pow(10, Exp) / Length - 0.5),
+	Seq = lists:seq(1, N),
+	StartTime = now(),
+	lists:foldl(fun(_, I) -> {I2, _, _, _} = ?MODULE:file_pointer(iaf, I, Length), I2 end, 0, Seq),
+	T = timer:now_diff(now(), StartTime),
+	error_logger:info_msg("file_pointer performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
 
 %%%===================================================================
 %%% Tests

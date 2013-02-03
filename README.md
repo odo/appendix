@@ -108,7 +108,6 @@ ok
 16> file:close(File).
 ok
 ```
-
 Actally this is exactly what data_slice/3 does:
 
 ```erlang

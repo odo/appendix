@@ -15,6 +15,7 @@
 -record (state, {
 	file_path_prefix
 	, id
+	, buffer_count_max
 	, index_file
 	, data_file
 	, data_file_name
@@ -22,6 +23,7 @@
 	, pointer_high
 	, pointer_low
 	, offset
+	, offset_synced
 	, count
 	, write_buffer
 	, index_write_buffer
@@ -35,24 +37,25 @@
 -define(OFFSETSIZEBITS, (?OFFSETSIZE * 8)).
 -define(SIZESIZE, 4).
 -define(SIZESIZEBITS, (?SIZESIZE * 8)).
--define(SYNCEVERY, 1000).
 -define(SERVER, ?MODULE).
+
+-define(CACHECOUNTDEFAULT, 1000).
 
 -compile({no_auto_import,[put/2]}).
 -export([
-	start_link/2
-	, start_link_with_id/2, start_link_with_id/3
-	, start_link_anon/1
+	start_link/2, start_link/3
 	, stop/1
 	, destroy/1
 	, info/1
 	, put/2
 	, next/2
 	, file_pointer/3
-	, decode_data/1
+	, file_pointer_lax/3
 	, data_slice/3
+	, data_slice_lax/3
 	, covers/2
 	, sync/1
+	, decode_data/1
 	, repair/1
 ]).
 
@@ -65,7 +68,7 @@
 -type file_name() :: binary().
 -type offset() :: non_neg_integer().
 -type length() :: non_neg_integer().
--type timeout_value() :: non_neg_integer() | undefined.
+
 % callbacks
 -export ([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -73,27 +76,30 @@
 -export([perf/1, perf_read/1, perf_file_pointer/2, trace/3]).
 
 %%%===================================================================
-%%% API
+%%% Starting
 %%%===================================================================
 
--spec start_link_with_id(list(), term()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link_with_id(PathPrefix, ID) when is_list(PathPrefix)->
-	start_link_with_id(PathPrefix, ID, infinity).
-
--spec start_link_with_id(list(), term(), timeout_value()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link_with_id(PathPrefix, ID, Timeout) when is_list(PathPrefix) ->
+-spec start_link(list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link(PathPrefix, Options) when is_list(PathPrefix) ->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link(?MODULE, [PathPrefix, ID, Timeout], []).
+	gen_server:start_link(?MODULE, [PathPrefix, parse_options(Options)], []).
 
--spec start_link_anon(list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link_anon(PathPrefix) when is_list(PathPrefix) ->
+-spec start_link(server_name(), list(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
+start_link(ServerName, PathPrefix, Options) when is_atom(ServerName), is_list(PathPrefix)->
 	lock_or_throw(PathPrefix),
-	gen_server:start_link(?MODULE, [PathPrefix, undefined, infinity], []).
+	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, parse_options(Options)], []).
 
--spec start_link(server_name(), list()) -> 'ignore' | {'error',_} | {'ok',pid()}.
-start_link(ServerName, PathPrefix) when is_atom(ServerName), is_list(PathPrefix)->
-	lock_or_throw(PathPrefix),
-	gen_server:start_link({local, ServerName}, ?MODULE, [PathPrefix, undefined, infinity], []).
+parse_options(Options) ->
+	Get = fun(Key, Default) -> proplists:get_value(Key, Options, Default) end,
+	{
+		Get(id, 		undefined),
+		Get(timeout, 	infinity),
+		Get(buffer_count_max, ?CACHECOUNTDEFAULT)
+	}.
+
+%%%===================================================================
+%%% API
+%%%===================================================================
 
 -spec info(server_name()) -> list().
 info(ServerName) ->
@@ -109,11 +115,23 @@ next(ServerName, Pointer) when is_integer(Pointer) ->
 
 -spec file_pointer(server_name(), pointer(), limit()) -> {pointer(), file_name(), offset(), length()} | not_found.
 file_pointer(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_integer(Limit) andalso Limit >= 2 ->
-	gen_server:call(ServerName, {file_pointer, Pointer, Limit}).
+	gen_server:call(ServerName, {file_pointer, Pointer, Limit, true}).
+
+-spec file_pointer_lax(server_name(), pointer(), limit()) -> {pointer(), file_name(), offset(), length()} | not_found.
+file_pointer_lax(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_integer(Limit) andalso Limit >= 2 ->
+	gen_server:call(ServerName, {file_pointer, Pointer, Limit, false}).
 
 -spec data_slice(server_name(), pointer(), limit()) -> {pointer(), data()} | not_found.
 data_slice(ServerName, Pointer, Limit) ->
-	case gen_server:call(ServerName, {file_pointer, Pointer, Limit}) of
+	data_slice(ServerName, Pointer, Limit, true).
+
+-spec data_slice_lax(server_name(), pointer(), limit()) -> {pointer(), data()} | not_found.
+data_slice_lax(ServerName, Pointer, Limit) ->
+	data_slice(ServerName, Pointer, Limit, false).
+
+-spec data_slice(server_name(), pointer(), limit(), boolean()) -> {pointer(), data()} | not_found.
+data_slice(ServerName, Pointer, Limit, ReadFull) ->
+	case gen_server:call(ServerName, {file_pointer, Pointer, Limit, ReadFull}) of
 		{FileName, Position, Length} -> 
 			{ok, File} = file:open(FileName, [raw, binary]),
 			{ok, Data} = file:pread(File, Position, Length),
@@ -147,12 +165,12 @@ sync_and_crash(ServerName) ->
     gen_server:call(ServerName, {sync_and_crash}).
 
 
-
 %%%===================================================================
 %%% Callbacks
 %%%===================================================================
 
-init([PathPrefix, ID, Timeout]) when is_list(PathPrefix)->
+init([PathPrefix, {ID, Timeout, CacheCount}])
+	when is_list(PathPrefix) andalso (is_integer(Timeout) orelse Timeout =:= infinity) andalso is_integer(CacheCount)->
 	process_flag(trap_exit, true),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
 	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName}]),
@@ -183,7 +201,7 @@ init([PathPrefix, ID, Timeout]) when is_list(PathPrefix)->
 	{ok, Count} = bisect_server:num_keys(IndexServer),
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
-	StateNew = #state{file_path_prefix = PathPrefix, id = ID, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index_server = IndexServer, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, timeout = Timeout},
+	StateNew = #state{file_path_prefix = PathPrefix, id = ID, buffer_count_max = CacheCount, index_file = IndexFile, data_file = DataFile, data_file_name = DataFileName, index_server = IndexServer, pointer_high = PointerHigh, pointer_low = PointerLow, offset = Offset, offset_synced = Offset, count = Count, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0, timeout = Timeout},
 	{ok, StateNew}.
 
 handle_call({info}, _From, State) ->
@@ -241,23 +259,6 @@ handle_call({next, PointerMin}, _From, State = #state{offset = Offset}) when is_
 	end,
 	{reply, Reply, StateNew, StateNew#state.timeout};
 
-handle_call({file_pointer, Pointer, Limit}, _From, State = #state{offset = Offset, data_file_name = DataFileName}) when is_integer(Pointer) andalso is_integer(Limit) ->
-	StateAwake = wake(State),
-	Reply =
-	case next_internal(Pointer, StateAwake#state.index_server) of
-		{_, OffsetStart} ->
-			case bisect_server:next_nth(StateAwake#state.index_server, encode_pointer(Pointer), Limit + 1) of
-				{ok, {_, OffsetEnd}} ->
-					{DataFileName, OffsetStart, decode_offset(OffsetEnd) - OffsetStart};
-				{ok, not_found} -> 
-					{DataFileName, OffsetStart, Offset - OffsetStart}
-			end;
-		not_found ->
-			not_found
-	end,
-	StateNew = sync_internal(StateAwake),
-	{reply, Reply, StateNew, StateNew#state.timeout};
-
 handle_call({covers, Pointer}, _From, State = #state{pointer_low = PointerLow, pointer_high = PointerHigh}) when is_integer(Pointer) ->
 	Reply = Pointer >= PointerLow andalso Pointer =< PointerHigh,
 	{reply, Reply, State, State#state.timeout};
@@ -278,7 +279,48 @@ handle_call({sync_and_crash}, _From, State) ->
 	{reply, ok, StateNew, State#state.timeout};
 
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, wake(State)}.
+    {stop, normal, ok, wake(State)};
+
+handle_call({file_pointer, Pointer, Limit, ReadFull}, _From, State = #state{offset = Offset}) when is_integer(Pointer) andalso is_integer(Limit) andalso is_boolean(ReadFull) ->
+	StateAwake = wake(State),
+	{Reply, StateNew} =
+	case next_internal(Pointer, StateAwake#state.index_server) of
+		{_, OS} ->
+			case bisect_server:next_nth(StateAwake#state.index_server, encode_pointer(Pointer), Limit + 1) of
+				% the reqeuested range ends within the existing data 
+				{ok, {_, OE}} ->
+					offset_range(OS, decode_offset(OE), ReadFull, StateAwake);
+				% the reqeuested range goes bejond the existing data
+				% we are passing the global offset as the requested end offset
+				{ok, not_found} -> 
+					offset_range(OS, Offset, ReadFull, StateAwake)
+			end;
+		not_found ->
+			{not_found, State}
+	end,
+	{reply, Reply, StateNew, StateNew#state.timeout}.
+
+% we only read the data that is synced
+offset_range(OffsetStart, _OffsetEndRequested, _ReadFull = false, State = #state{data_file_name = DataFileName, offset_synced = OffsetSynced}) ->
+	case OffsetSynced of
+		% nothing was written to disk
+		0 ->
+			{not_found, State};
+		_ ->
+			{{DataFileName, OffsetStart, OffsetSynced - OffsetStart}, State}
+	end;
+
+% we need to read to the very end of the data
+offset_range(OffsetStart, OffsetEndRequested, _ReadFull = true, State = #state{data_file_name = DataFileName, offset_synced = OffsetSynced}) ->
+	StateSynced = case OffsetEndRequested > OffsetSynced of
+		% we want to read into a non-synced range 
+		true ->
+			sync_internal(State);
+		% the requested range has already been synced
+		false ->
+			State
+	end,
+	{{DataFileName, OffsetStart, OffsetEndRequested - OffsetStart}, StateSynced}.
 
 handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
 	file:delete(data_file_name(PathPrefix)),
@@ -418,22 +460,22 @@ encode_offset(Offset) ->
 decode_offset(Offset) ->
 	binary:decode_unsigned(Offset).	
 
-maybe_sync(State = #state{write_buffer_size = WriteBufferSize}) ->
-	case WriteBufferSize >= ?SYNCEVERY of
+maybe_sync(State = #state{write_buffer_size = WriteBufferSize, buffer_count_max = CacheCount}) ->
+	case WriteBufferSize >= CacheCount of
 		true ->
 			sync_internal(State);
 		false ->
 			State
 	end.
 
-sync_internal(State = #state{data_file = DataFile, index_file = IndexFile, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) ->
+sync_internal(State = #state{data_file = DataFile, index_file = IndexFile, offset = Offset, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) ->
 	case WriteBufferSize of
 		0 ->
 			State;
 		_ ->
 			file:write(DataFile, WriteBuffer),
 			file:write(IndexFile, IndexWriteBuffer),
-			State#state{write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
+			State#state{offset_synced = Offset, write_buffer = <<>>, index_write_buffer = <<>>, write_buffer_size = 0}
 	end.
 
 %%%===================================================================
@@ -496,7 +538,7 @@ iaf_test_() ->
         , {"can tell if it covers some pointer", fun test_cover/0}
         , {"test put speed", timeout, 120, fun test_put_speed/0}
         , {"is durable", fun test_durability/0}
-        , {"returns correct file slices", fun test_data_slice/0}
+        , {"returns correct data slices", fun test_data_slice/0}
         , {"returns correct info", fun test_info/0}
         , {"destroys", fun test_destroy/0}
         , {"locks", fun test_locking/0}
@@ -508,7 +550,7 @@ test_setup() ->
 	application:start(sasl),
 	os:cmd("rm -rf " ++ ?TESTDB ++ "*"),
 	os:cmd("mkdir " ++ ?TESTDB),
-	?MODULE:start_link(iaf, ?TESTDB ++ "topic").
+	?MODULE:start_link(iaf, ?TESTDB ++ "topic", []).
  
 test_teardown(_) ->
 	case whereis(iaf) of
@@ -535,24 +577,29 @@ test_put_next() ->
 	?assertEqual(not_found, Next(IW3)).
 
 test_data_slice() ->
+	DS = fun(P, L) -> data_slice(iaf, P, L) end,
+	DSL = fun(P, L) -> data_slice_lax(iaf, P, L) end,
 	Put = fun(D) -> ?MODULE:put(iaf, D) end,
 	I1  = Put(<<"a">>),
 	I2 = Put(<<"bb">>),
+	?assertEqual(not_found, DSL(0, 2)),
+	sync(iaf),
+	?assertEqual([{I1, <<"a">>}, {I2, <<"bb">>}], DSL(0, 2)),
 	I3  = Put(<<"ccc">>),
 	I4  = Put(<<"dddd">>),
 	I5  = Put(<<"eeeee">>),
-	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}], data_slice(iaf, I1, 2)),
-	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}], data_slice(iaf, I1, 3)),
-	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], data_slice(iaf, I1, 4)),
-	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], data_slice(iaf, I1, 5)),
-	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], data_slice(iaf, I1, 6)),
-	?assertEqual([{I5, <<"eeeee">>}], data_slice(iaf, I4, 2)),
-	?assertEqual(not_found, data_slice(iaf, I5, 2)).
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}], DS(I1, 2)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}], DS(I1, 3)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], DS(I1, 4)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], DS(I1, 5)),
+	?assertEqual([{I2, <<"bb">>}, {I3, <<"ccc">>}, {I4, <<"dddd">>}, {I5, <<"eeeee">>}], DS(I1, 6)),
+	?assertEqual([{I5, <<"eeeee">>}], DS(I4, 2)),
+	?assertEqual(not_found, DS(I5, 2)).
 
 test_durability() ->
 	stop(iaf),
 	timer:sleep(100),
-	start_link(iaf, ?TESTDB ++ "topic"),
+	start_link(iaf, ?TESTDB ++ "topic", []),
 	Next = fun(I) -> ?MODULE:next(iaf, I) end,
 	Put = fun(D) -> ?MODULE:put(iaf, D) end,
 	D1 = <<"my_first_data">>,
@@ -571,7 +618,7 @@ test_durability() ->
 	State1 = state(iaf),
 	stop(iaf),
 	timer:sleep(100),
-	start_link(iaf, ?TESTDB ++ "topic"),
+	start_link(iaf, ?TESTDB ++ "topic", []),
 	State2 = state(iaf),
 	states_match(State1, State2),
 	Verify().
@@ -605,7 +652,7 @@ test_cover() ->
 
 test_info() ->
 	Path = ?TESTDB ++ "info_test",
-	{ok, Server} = start_link_with_id(Path, "the_id"),
+	{ok, Server} = start_link(Path, [{id, "the_id"}]),
 	Check = fun(Key, Expected) -> ?assertEqual(Expected, proplists:get_value(Key, info(Server))) end,
 	Overhaed = ?INDEXSIZE + ?SIZESIZE,
 	Check(size, 0),
@@ -629,11 +676,11 @@ test_destroy() ->
 	?assertEqual({IW1, D1}, Next(0)),
 	destroy(iaf),
 	timer:sleep(100),
-	start_link(iaf, ?TESTDB ++ "topic"),
+	start_link(iaf, ?TESTDB ++ "topic", []),
 	?assertEqual(not_found, Next(0)).
 
 test_locking() ->
-	?assertException(throw, {error, {locked, ?TESTDB ++ "topic"}}, start_link(another_server, ?TESTDB ++ "topic")).
+	?assertException(throw, {error, {locked, ?TESTDB ++ "topic"}}, start_link(another_server, ?TESTDB ++ "topic", [])).
 
 test_put_speed() ->
 	N = round(1 * math:pow(10, 5)),

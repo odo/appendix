@@ -22,7 +22,7 @@ Starting the server with a path prefix will create three files, one for the data
 mkdir /tmp/appendix
 make console
 Eshell V5.9.3.1  (abort with ^G)
-1> appendix_server:start_link(as, "/tmp/appendix/test").
+1> appendix_server:start_link(as, "/tmp/appendix/test", []).
 
 =INFO REPORT==== 2-Feb-2013::18:21:19 ===
 appendix_server starting with {<<"/tmp/appendix/test_index">>,
@@ -32,6 +32,11 @@ appendix_server starting with {<<"/tmp/appendix/test_index">>,
 Files don't exist, creating new ones.
 {ok,<0.34.0>}
 ```
+start_link/2 and start_link/3 take an options proplist as the last argument (keys are atoms):
+* 'id': an arbitrary identifier which is returned by info/1
+* 'timeout': the number of milliseconds without any request after which the server goes into hibernation
+* 'buffer_count_max': the capacity of the write buffer
+
 You can store binary data using put/2 getting an integer pointer in return. The pointer is a timestamp in microseconds since unix epoch.
 Retrieving data works by iterating using next/2 similar to ets:next/2.
 
@@ -62,7 +67,7 @@ The server can be suspended and restarted, rebuilding the index from the existin
 =INFO REPORT==== 2-Feb-2013::18:21:19 ===
 unlocking "/tmp/appendix/test"
 ok
-9> appendix_server:start_link(as, "/tmp/appendix/test").
+9> appendix_server:start_link(as, "/tmp/appendix/test", []).
 
 =INFO REPORT==== 2-Feb-2013::18:21:19 ===
 appendix_server starting with {<<"/tmp/appendix/test_index">>,
@@ -105,12 +110,41 @@ ok
 ```
 
 Actally this is exactly what data_slice/3 does:
+
 ```erlang
 17> appendix_server:data_slice(as, 0, 3).
 [{1359825679286167,<<"hello">>},
  {1359825679287543,<<"world">>},
  {1359825679293799,<<"you">>}]
 ```
+
+call info/1 to get
+* the ID as specified in the start options
+* the low and high pointer
+* the size of the data in bytes
+* the items count
+
+```erlang
+18> appendix_server:info(as).
+[{id,undefined},
+ {pointer_low,1359924455531134},
+ {pointer_high,1359924455541506},
+ {size,105},
+ {count,7}]
+```
+
+## Synchronization:
+
+appendix does not write each item to disk immediately but maintains a write buffer which can be flushed (syncing).
+To control the number of items in the write buffer use the _buffer_count_max_ option. Setting it to 100 means that appendix
+accumulates 100 items befor anything is written to disk. Thus in a case of (catastrophic) failure these items will be lost.
+
+Call sync/1 to flush the write buffer.
+
+## Synchronization and file pointers:
+
+As mentioned, file_pointers/3 enables you to read data straight from appendix' data file. Since that data might not be synced yet, the request might force a sync. When writing and reading recent data at the same time this greatly impacts performance.
+An alternative is to use file_pointers_lax/3 and data_slice_lax/3 which only reads data which is already on disk. When setting *buffer_count_max* to 100 and calling sync/1 every second ensures that file_pointers_lax/3 misses 100 items or 1 second of writes maximum while not impeding write performance.
 
 ## Hibernation:
 

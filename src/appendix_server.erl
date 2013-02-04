@@ -301,13 +301,13 @@ handle_call({file_pointer, Pointer, Limit, ReadFull}, _From, State = #state{offs
 	{reply, Reply, StateNew, StateNew#state.timeout}.
 
 % we only read the data that is synced
-offset_range(OffsetStart, _OffsetEndRequested, _ReadFull = false, State = #state{data_file_name = DataFileName, offset_synced = OffsetSynced}) ->
+offset_range(OffsetStart, OffsetEndRequested, _ReadFull = false, State = #state{data_file_name = DataFileName, offset_synced = OffsetSynced}) ->
 	case OffsetSynced of
 		% nothing was written to disk
 		0 ->
 			{not_found, State};
 		_ ->
-			{{DataFileName, OffsetStart, OffsetSynced - OffsetStart}, State}
+			{{DataFileName, OffsetStart, min(OffsetEndRequested, OffsetSynced) - OffsetStart}, State}
 	end;
 
 % we need to read to the very end of the data
@@ -584,7 +584,8 @@ test_data_slice() ->
 	I2 = Put(<<"bb">>),
 	?assertEqual(not_found, DSL(0, 2)),
 	sync(iaf),
-	?assertEqual([{I1, <<"a">>}, {I2, <<"bb">>}], DSL(0, 2)),
+	?assertEqual([{I1, <<"a">>}, {I2, <<"bb">>}], DSL(0, 10)),
+	?assertEqual([{I1, <<"a">>}], DSL(0, 1)),
 	I3  = Put(<<"ccc">>),
 	I4  = Put(<<"dddd">>),
 	I5  = Put(<<"eeeee">>),

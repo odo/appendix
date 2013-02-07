@@ -173,16 +173,14 @@ init([PathPrefix, {ID, Timeout, CacheCount}])
 	when is_list(PathPrefix) andalso (is_integer(Timeout) orelse Timeout =:= infinity) andalso is_integer(CacheCount)->
 	process_flag(trap_exit, true),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
-	error_logger:info_msg("~p starting with ~p.\n", [?MODULE, {IndexFileName, DataFileName}]),
 	{IndexServer, PointerLow, PointerHigh, Offset} = 
 	case file:read_file_info(DataFileName) of
 		{error, enoent} ->
-			error_logger:info_msg("Files don't exist, creating new ones.\n", []),
+			error_logger:info_msg("starting empty appendix server writing to ~p.\n", [PathPrefix]),
 			{ok, IndexServerNew} = bisect_server:start_link(?INDEXSIZE, ?OFFSETSIZE),
 			{IndexServerNew, undefined, undefined, 0};
 		{ok, DataFileInfo} ->
-			error_logger:info_msg("Files exist, loading...\n", []),
-			StartTime = now(),
+			error_logger:info_msg("starting appendix server from ~p.\n", [PathPrefix]),
 			{ok, IndexData} = file:read_file(IndexFileName),
 			{ok, IndexServerNew} = bisect_server:start_link_with_data(?INDEXSIZE, ?OFFSETSIZE, IndexData),
 			PL = case bisect_server:first(IndexServerNew) of
@@ -194,8 +192,6 @@ init([PathPrefix, {ID, Timeout, CacheCount}])
 				{ok, {P2, _}} -> decode_pointer(P2)
 			end,
 			Off = DataFileInfo#file_info.size,
-			T = timer:now_diff(now(), StartTime),
-			error_logger:info_msg("loaded index of ~p bytes in ~p ms.\n", [byte_size(IndexData), (T / math:pow(10, 3))]),
 			{IndexServerNew, PL, PH, Off}
 	end,
 	{ok, Count} = bisect_server:num_keys(IndexServer),
@@ -343,7 +339,7 @@ handle_info({'EXIT', Pid, normal}, State) when Pid =:= State#state.index_server 
 	% the index server died
 	% this probably means that we told it to do so
 	% because we want to go into hibernation.
-	error_logger:error_msg("index server ~p died ... hibernating ...\n", [State#state.index_server]),
+	error_logger:error_msg("appendix server ~p goes into hibernation ...\n", [self()]),
 	% we are dropping the server and the file handlers
 	% as a courtesy to the operating system.
 	file:close(State#state.index_file),
@@ -378,11 +374,8 @@ repair(Path) ->
 wake(State = #state{file_path_prefix = PathPrefix}) when State#state.index_server =:= undefined ->
 	error_logger:info_msg("waking from hibernation: ~p.\n", [PathPrefix]),
 	{IndexFileName, DataFileName} = {index_file_name(PathPrefix), data_file_name(PathPrefix)},
-	StartTime = now(),
 	{ok, IndexData} = file:read_file(IndexFileName),
 	{ok, IndexServer} = bisect_server:start_link_with_data(?INDEXSIZE, ?OFFSETSIZE, IndexData),
-	T = timer:now_diff(now(), StartTime),
-	error_logger:info_msg("loaded index of ~p bytes in ~p ms.\n", [byte_size(IndexData), (T / math:pow(10, 3))]),
 	{ok, IndexFile} = file:open(IndexFileName, [append, binary, raw]),
 	{ok, DataFile}  = file:open(DataFileName,  [read, append, binary, raw]),
 	State#state{index_server = IndexServer, index_file = IndexFile, data_file = DataFile};

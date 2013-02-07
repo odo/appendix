@@ -217,10 +217,14 @@ handle_call({info}, _From, State) ->
 handle_call({put, Data}, _From, State = #state{offset = Offset, count = Count, pointer_low = PointerLow, write_buffer = WriteBuffer, index_write_buffer = IndexWriteBuffer, write_buffer_size = WriteBufferSize}) when is_binary(Data)->
 	StateAwake = wake(State),
 	PointerNow = now_pointer(),
-	IndexData = encode_pointer_offset(PointerNow, Offset),
-	bisect_server:append(StateAwake#state.index_server, IndexData),
-	IndexWriteBufferNew = <<IndexWriteBuffer/binary, IndexData/binary>>,
-	DataEncoded = encode_data(PointerNow, Data),
+	IEnc = encode_pointer(PointerNow),
+	OEnc = encode_offset(Offset),
+	bisect_server:append(StateAwake#state.index_server, IEnc, OEnc),
+	IndexWriteBufferNew = <<IndexWriteBuffer/binary, IEnc/binary, OEnc/binary>>,
+	PointerEncoded = encode_pointer(PointerNow),
+	Size = byte_size(Data) + byte_size(PointerEncoded),
+	SizeBin = <<Size:?SIZESIZEBITS>>,
+	DataEncoded = << SizeBin/binary, PointerEncoded/binary, Data/binary >>,
 	WriteBufferNew = <<WriteBuffer/binary, DataEncoded/binary>>,
 	PointerLowNew = case PointerLow of
 		undefined -> PointerNow;
@@ -427,12 +431,6 @@ now_pointer() ->
 	{MegaSecs,Secs,MicroSecs} = now(),
     (MegaSecs*1000000 + Secs)*1000000 + MicroSecs.
 
-encode_data(Pointer, Data) ->
-	PointerEncoded = encode_pointer(Pointer),
-	Size = byte_size(Data) + byte_size(PointerEncoded),
-	SizeBin = <<Size:?SIZESIZEBITS>>,
-	<< SizeBin/binary, PointerEncoded/binary, Data/binary >>.
-
 decode_data(<<>>) ->
 	[];
 
@@ -442,11 +440,6 @@ decode_data(Data) ->
 	DataSize = Size - byte_size(Pointer),
 	<< Item:DataSize/binary, Rest2/binary>> = Rest1,
 	[{decode_pointer(Pointer), Item} | decode_data(Rest2)].
-
-encode_pointer_offset(I, O) ->
-	IEnc = encode_pointer(I),
-	OEnc = encode_offset(O),
-	<<IEnc/binary, OEnc/binary>>.
 
 encode_pointer(Micros) ->
 	<<Micros:?INDEXSIZEBITS>>.

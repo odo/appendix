@@ -1,6 +1,7 @@
 # appendix
 
 appendix is an Erlang server to manage an append-only file of arbitrary data while maintaining an index of the parts added.
+It's using bisect for its index (https://github.com/odo/bisect).
 
 The state of this library is experimental.
 
@@ -171,3 +172,9 @@ Write performance will degrade when using file_pointer/3 or data_slice/3 at the 
 
 This measurement was taken on an laptop with a Intel Core 2 Duo @ 2,53 GHz, 1067 MHz memory bus and a SATA Seagate Momentus XT.
 On a server system you will see double to triple the performance.
+
+## Tests:
+
+```
+make test
+```

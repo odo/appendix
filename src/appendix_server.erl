@@ -323,6 +323,7 @@ offset_range(OffsetStart, OffsetEndRequested, _ReadFull = true, State = #state{d
 	{{DataFileName, OffsetStart, OffsetEndRequested - OffsetStart}, StateSynced}.
 
 handle_cast(destroy, State = #state{file_path_prefix = PathPrefix}) ->
+	error_logger:info_msg("destroying server ~p for ~p.", [self(), PathPrefix]),
 	file:delete(data_file_name(PathPrefix)),
 	file:delete(index_file_name(PathPrefix)),
 	unlock(PathPrefix),

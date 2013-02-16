@@ -73,7 +73,7 @@
 -export ([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 % api
--export([perf/1, perf_read/1, perf_file_pointer/2, trace/3]).
+-export([perf/1, perf_read/1, trace/3]).
 
 %%%===================================================================
 %%% Starting
@@ -113,11 +113,11 @@ put(ServerName, Data) ->
 next(ServerName, Pointer) when is_integer(Pointer) ->
 	gen_server:call(ServerName, {next, Pointer}).
 
--spec file_pointer(server_name(), pointer(), limit()) -> {pointer(), file_name(), offset(), length()} | not_found.
+-spec file_pointer(server_name(), pointer(), limit()) -> {file_name(), offset(), length()} | not_found.
 file_pointer(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_integer(Limit) andalso Limit >= 2 ->
 	gen_server:call(ServerName, {file_pointer, Pointer, Limit, true}).
 
--spec file_pointer_lax(server_name(), pointer(), limit()) -> {pointer(), file_name(), offset(), length()} | not_found.
+-spec file_pointer_lax(server_name(), pointer(), limit()) -> {file_name(), offset(), length()} | not_found.
 file_pointer_lax(ServerName, Pointer, Limit) when is_integer(Pointer) andalso is_integer(Limit) andalso Limit >= 2 ->
 	gen_server:call(ServerName, {file_pointer, Pointer, Limit, false}).
 
@@ -500,15 +500,6 @@ perf_read(Exp) ->
 	lists:foldl(fun(_, I) -> {I2, _} = ?MODULE:next(iaf, I), I2 end, 0, Seq),
 	T = timer:now_diff(now(), StartTime),
 	error_logger:info_msg("read performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
-
-perf_file_pointer(Exp, Length) ->
-	perf(Exp),
-	N = round(math:pow(10, Exp) / Length - 0.5),
-	Seq = lists:seq(1, N),
-	StartTime = now(),
-	lists:foldl(fun(_, I) -> {I2, _, _, _} = ?MODULE:file_pointer(iaf, I, Length), I2 end, 0, Seq),
-	T = timer:now_diff(now(), StartTime),
-	error_logger:info_msg("file_pointer performance: ~p Ops/s with ~p total.\n", [(N / (T / math:pow(10, 6))), N]).
 
 %%%===================================================================
 %%% Tests
